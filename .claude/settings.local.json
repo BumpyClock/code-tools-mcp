@@ -6,7 +6,8 @@
       "mcp__sequentialthinking__sequentialthinking",
       "mcp__code-tools-mcp__glob",
       "mcp__code-tools-mcp__read_file",
-      "mcp__code-tools-mcp__edit"
+      "mcp__code-tools-mcp__edit",
+      "Bash(dir /B \"C:\\Users\\adity\\Projects\\code-tools-mcp\\ai_docs\")"
     ],
     "deny": [],
     "ask": []

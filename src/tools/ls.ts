@@ -67,11 +67,21 @@ export async function lsTool(input: LsInput) {
   }
 
   entries.sort((a, b) => (a.isDirectory === b.isDirectory ? a.name.localeCompare(b.name) : a.isDirectory ? -1 : 1));
-  const listing = entries.map((e) => `${e.isDirectory ? '[DIR] ' : ''}${e.name}`).join('\n');
-  let text = `Directory listing for ${relativize(abs)}:\n${listing}`;
-  const ignoredMsgs = [] as string[];
-  if (gitIgnoredCount > 0) ignoredMsgs.push(`${gitIgnoredCount} ignored by rules`);
-  if (ignoredMsgs.length) text += `\n\n(${ignoredMsgs.join(', ')})`;
+
+  let text: string;
+  if (entries.length === 0) {
+    // Empty directory - clearer message
+    text = `Directory listing for ${relativize(abs)}:\n(empty directory)`;
+    const ignoredMsgs = [] as string[];
+    if (gitIgnoredCount > 0) ignoredMsgs.push(`${gitIgnoredCount} ignored by rules`);
+    if (ignoredMsgs.length) text += `\n\n(${ignoredMsgs.join(', ')})`;
+  } else {
+    const listing = entries.map((e) => `${e.isDirectory ? '[DIR] ' : ''}${e.name}`).join('\n');
+    text = `Directory listing for ${relativize(abs)}:\n${listing}`;
+    const ignoredMsgs = [] as string[];
+    if (gitIgnoredCount > 0) ignoredMsgs.push(`${gitIgnoredCount} ignored by rules`);
+    if (ignoredMsgs.length) text += `\n\n(${ignoredMsgs.join(', ')})`;
+  }
 
   return {
     content: [{ type: 'text' as const, text }],

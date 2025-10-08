@@ -35,11 +35,19 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
   const files = new Set<string>();
   for (const pattern of searchPatterns) {
     const absMatches = await fg(pattern, { cwd: root, absolute: true, dot: true, ignore: excludes });
-    for (const p of absMatches) files.add(p);
+    for (const p of absMatches) {
+      // Belt-and-suspenders: re-check workspace containment for each resolved path
+      try {
+        resolveWithinWorkspace(p);
+        files.add(p);
+      } catch {
+        // Path is outside workspace, skip it
+      }
+    }
   }
   const filesArr = Array.from(files);
   if (filesArr.length === 0) {
-    return { content: [{ type: 'text' as const, text: 'No files matched.' }], structuredContent: { files: [] } };
+    return { content: [{ type: 'text' as const, text: 'No files matched.' }], structuredContent: { files: [], summary: 'No files matched.' } };
   }
 
   let totalBytes = 0;
@@ -47,29 +55,80 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
   const included: string[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
 
+  // Track skip reasons for aggregation
+  const skipCounts = { ignored: 0, binary: 0, tooLarge: 0, notFile: 0, totalCapReached: 0, readError: 0 };
+  let totalCapReached = false;
+
   for (const abs of filesArr) {
     const relPosix = path.relative(root, abs).split(path.sep).join('/');
-    if (ig.ignores(relPosix)) { skipped.push({ path: abs, reason: 'ignored' }); continue; }
+    if (ig.ignores(relPosix)) {
+      skipped.push({ path: abs, reason: 'ignored' });
+      skipCounts.ignored++;
+      continue;
+    }
     try {
       const st = await fs.stat(abs);
-      if (!st.isFile()) { skipped.push({ path: abs, reason: 'not a file' }); continue; }
+      if (!st.isFile()) {
+        skipped.push({ path: abs, reason: 'not a file' });
+        skipCounts.notFile++;
+        continue;
+      }
       // small cap per file to avoid huge binaries
-      if (st.size > 1024 * 1024) { skipped.push({ path: abs, reason: 'too large' }); continue; }
+      if (st.size > 1024 * 1024) {
+        skipped.push({ path: abs, reason: 'too large' });
+        skipCounts.tooLarge++;
+        continue;
+      }
       const buf = await fs.readFile(abs);
-      if (!isText(null, buf)) { skipped.push({ path: abs, reason: 'binary' }); continue; }
+      if (!isText(null, buf)) {
+        skipped.push({ path: abs, reason: 'binary' });
+        skipCounts.binary++;
+        continue;
+      }
       const sep = SEP_FORMAT.replace('{filePath}', path.relative(root, abs));
       const text = buf.toString('utf8');
       const chunk = `${sep}\n${text}\n`;
       const projected = totalBytes + Buffer.byteLength(chunk, 'utf8');
-      if (projected > TOTAL_BYTE_CAP) { skipped.push({ path: abs, reason: 'total cap reached' }); break; }
+      if (projected > TOTAL_BYTE_CAP) {
+        skipped.push({ path: abs, reason: 'total cap reached' });
+        skipCounts.totalCapReached++;
+        totalCapReached = true;
+        break;
+      }
       output += chunk;
       totalBytes = projected;
       included.push(abs);
     } catch (e) {
       skipped.push({ path: abs, reason: 'read error' });
+      skipCounts.readError++;
     }
   }
 
   output += TERMINATOR;
-  return { content: [{ type: 'text' as const, text: output }], structuredContent: { files: included, skipped, totalBytes, summary: `Read ${included.length} file(s).` } };
+
+  // Build aggregated summary
+  const summaryParts = [`Read ${included.length} file(s).`];
+  if (skipped.length > 0) {
+    const skipSummary: string[] = [];
+    if (skipCounts.ignored > 0) skipSummary.push(`${skipCounts.ignored} ignored`);
+    if (skipCounts.binary > 0) skipSummary.push(`${skipCounts.binary} binary`);
+    if (skipCounts.tooLarge > 0) skipSummary.push(`${skipCounts.tooLarge} too large`);
+    if (skipCounts.notFile > 0) skipSummary.push(`${skipCounts.notFile} not a file`);
+    if (skipCounts.totalCapReached > 0) skipSummary.push(`${skipCounts.totalCapReached} total cap reached`);
+    if (skipCounts.readError > 0) skipSummary.push(`${skipCounts.readError} read errors`);
+    summaryParts.push(`Skipped ${skipped.length}: ${skipSummary.join(', ')}`);
+  }
+
+  return {
+    content: [{ type: 'text' as const, text: output }],
+    structuredContent: {
+      files: included,
+      skipped,
+      skipCounts,
+      totalBytes,
+      truncated: totalCapReached,
+      totalCapReached,
+      summary: summaryParts.join(' ')
+    }
+  };
 }

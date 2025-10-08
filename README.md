@@ -50,6 +50,15 @@ Add to your Claude config JSON:
 }
 ```
 
+**CODEX CLI Config Example**
+```
+[mcp_servers.code-tools]
+command = "C:\\Users\\{username}\\AppData\\Local\\fnm_multishells\\16024_1758470138359\\node.exe"
+args = [ "C:\\Users\\{username}\\Projects\\code-tools-mcp\\dist\\index.js"]
+env = { APPDATA = "C:\\Users\\{username}\\AppData\\Roaming", LOCALAPPDATA = "C:\\Users\\{username}\\AppData\\Local", HOME = "C:\\Users\\{username}", SystemRoot = "C:\\Windows", ComSpec = "C:\\Windows\\System32\\cmd.exe" }
+startup_timeout_ms = 20_000
+```
+
 **Notes**
 
 - Uses STDIO transport; avoid `console.log` (stdout). Any diagnostics are written to stderr.
