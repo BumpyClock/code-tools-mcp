@@ -13,20 +13,20 @@ Legend: [ ] = todo, [x] = done, [~] = partial
 - [x] Optional smart‑case search behavior:
   - grep: emulate smart‑case when `ignore_case` is undefined.
   - ripgrep: prefer `--smart-case` when `ignore_case` not explicitly set.
-- [ ] README updates (document new/changed options and behaviors): grep, ripgrep, glob, ls, read_file, read_many_files.
-- [ ] Docs cleanup: ensure all references to `.geminiignore` are removed from docs (code already purged).
-- [ ] Verify Windows path containment (case‑insensitive, trailing separators) in workspace utils.
+- [x] README updates (document new/changed options and behaviors): grep, ripgrep, glob, ls, read_file, read_many_files.
+- [x] Docs cleanup: ensure all references to `.geminiignore` are removed from docs (code already purged).
+- [x] Verify Windows path containment (case‑insensitive, trailing separators) in workspace utils (already implemented in workspace.ts).
 
 ## Client‑Facing (MCP) Ergonomics
 - [x] Short, token‑efficient tool descriptions in `src/index.ts` (one‑liners).
-- [ ] Add `.describe(...)` to every Zod input property so parameter docs flow to `tools/list`.
-- [ ] Define `outputSchema` (Zod) for tools that return `structuredContent`; wire to `registerTool`.
-- [ ] Ensure schema docs include defaults/limits (e.g., `max_matches`, caps, pagination limits).
-- [ ] Export unified TS types for clients/tests in `src/types/tools.ts` (re‑export `z.infer` Input/Output).
-- [ ] README: "Using These Tools from an MCP Client" section with TS snippet for `tools/list` and `client.callTool`.
-- [ ] Document `tools/list` pagination (`cursor`) and `tools/list_changed` notification semantics.
-- [ ] Add per‑tool minimal call examples (1–2 lines) matching the schemas.
-- [ ] Add "Tool Stability" note (stable names; concise descriptions; parameter docs live in schema).
+- [x] Add `.describe(...)` to every Zod input property so parameter docs flow to `tools/list` (already implemented).
+- [ ] Define `outputSchema` (Zod) for tools that return `structuredContent`; wire to `registerTool` (deferred - requires MCP SDK investigation).
+- [x] Ensure schema docs include defaults/limits (e.g., `max_matches`, caps, pagination limits).
+- [x] Export unified TS types for clients/tests in `src/types/tools.ts` (re‑export `z.infer` Input/Output).
+- [x] README: "Using These Tools from an MCP Client" section with TS snippet for `tools/list` and `client.callTool`.
+- [ ] Document `tools/list` pagination (`cursor`) and `tools/list_changed` notification semantics (not applicable for this server).
+- [x] Add per‑tool minimal call examples (1–2 lines) matching the schemas.
+- [x] Add "Tool Stability" note (stable names; concise descriptions; parameter docs live in schema).
 
 ## Tool‑Specific
 
@@ -34,7 +34,7 @@ Legend: [ ] = todo, [x] = done, [~] = partial
 - [x] Add explicit "no change" detection and error (EDIT_NO_CHANGE) when `old_string === new_string` or computed new content equals current.
 - [x] Improve error messaging parity: when file exists and `old_string === ''`, surface clear error instead of generic occurrence failure.
 - [x] Add `structuredContent.summary` (e.g., occurrences replaced, applied/preview).
-- [ ] Consider safer replacement semantics for literal `$` handling (optional parity with reference `safeLiteralReplace`).
+- [x] Consider safer replacement semantics for literal `$` handling (optional parity with reference `safeLiteralReplace`) - marked as optional, current implementation is sufficient.
 
 ### write-file.ts (`src/tools/write-file.ts`)
 - [x] Add `structuredContent.summary` and include a concise diff summary (lines added/removed) if feasible.
@@ -43,15 +43,15 @@ Legend: [ ] = todo, [x] = done, [~] = partial
 - [x] Include note in responses when `modified_by_user` is true.
 
 ### read-file.ts (`src/tools/read-file.ts`)
-- [ ] Add opt‑in flag to allow reading `.gitignore`‑ignored files (e.g., `allow_ignored?: boolean`).
-- [ ] Include a `summary` on non‑paginated reads for consistency.
-- [ ] Pagination UX: return a `nextOffset` hint in structured content when partial slice returned.
+- [x] Add opt‑in flag to allow reading `.gitignore`‑ignored files (e.g., `allow_ignored?: boolean`).
+- [x] Include a `summary` on non‑paginated reads for consistency.
+- [x] Pagination UX: return a `nextOffset` hint in structured content when partial slice returned.
 - [ ] (Optional) Support images/PDFs as model‑readable parts if needed by consumers; otherwise keep current binary summary.
 
 ### read-many-files.ts (`src/tools/read-many-files.ts`)
-- [ ] Add workspace containment re‑check for each resolved path (belt‑and‑suspenders after globbing).
-- [ ] Surface aggregated skip reasons and counts (ignored, binary, too large, total cap reached) in structured summary.
-- [ ] Expose `truncated`/`totalCapReached` when hitting TOTAL_BYTE_CAP.
+- [x] Add workspace containment re‑check for each resolved path (belt‑and‑suspenders after globbing).
+- [x] Surface aggregated skip reasons and counts (ignored, binary, too large, total cap reached) in structured summary.
+- [x] Expose `truncated`/`totalCapReached` when hitting TOTAL_BYTE_CAP.
 - [ ] (Optional parity) Allow explicit inclusion of images/PDFs when referenced by name/extension and emit suitable parts.
 
 ### grep.ts (`src/tools/grep.ts`)
@@ -71,8 +71,8 @@ Legend: [ ] = todo, [x] = done, [~] = partial
 - [x] Optional: report `gitIgnoredCount` in result when zero files are returned to aid debugging.
 
 ### ls.ts (`src/tools/ls.ts`)
-- [ ] When directory is empty, return a clearer neutral message alongside structured entries (parity polish).
-- [ ] Keep reporting only `.gitignore` counts (no `.geminiignore`) per project requirement; verify README reflects this.
+- [x] When directory is empty, return a clearer neutral message alongside structured entries (parity polish).
+- [x] Keep reporting only `.gitignore` counts (no `.geminiignore`) per project requirement; verify README reflects this.
 
 ## Verification & Tests
 - [ ] Workspace containment tests (win32 case‑insensitive, POSIX), trailing separators.
@@ -83,10 +83,10 @@ Legend: [ ] = todo, [x] = done, [~] = partial
 - [ ] read_many_files tests: total size cap signaling; include/exclude merging; ignored/skipped aggregation; workspace re‑check.
 
 ## Documentation Checklist
-- [ ] Update README sections for each tool reflecting new flags/behavior and limits.
-- [ ] Add short usage examples for: grep/ripgrep `max_matches`, `ignore_case`/smart‑case, glob sorting behavior, read_file `allow_ignored`.
-- [ ] Note removal of `.geminiignore` support across tools and clarify only `.gitignore` is respected.
-- [ ] Add "Using These Tools from an MCP Client" section (TS snippet for `tools/list` and `client.callTool`).
-- [ ] Mention that parameter docs come from JSON Schema (via Zod `.describe(...)`).
-- [ ] Brief per‑tool minimal call examples (1–2 lines) matching schemas.
+- [x] Update README sections for each tool reflecting new flags/behavior and limits.
+- [x] Add short usage examples for: grep/ripgrep `max_matches`, `ignore_case`/smart‑case, glob sorting behavior, read_file `allow_ignored`.
+- [x] Note removal of `.geminiignore` support across tools and clarify only `.gitignore` is respected.
+- [x] Add "Using These Tools from an MCP Client" section (TS snippet for `tools/list` and `client.callTool`).
+- [x] Mention that parameter docs come from JSON Schema (via Zod `.describe(...)`).
+- [x] Brief per‑tool minimal call examples (1–2 lines) matching schemas.
 

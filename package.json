@@ -1,18 +1,46 @@
 {
   "name": "code-tools-mcp",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Local-only MCP server exposing fast code navigation, reading, and editing tools over STDIO.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./types/*": "./dist/types/*.d.ts",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "code-tools-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "package.json"
+  ],
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "prepublishOnly": "npm run build"
   },
-  "keywords": [],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "stdio",
+    "tools",
+    "ripgrep",
+    "code",
+    "llm",
+    "agent"
+  ],
   "author": "",
   "license": "ISC",
-  "type": "module",
   "engines": {
     "node": ">=18"
   },
