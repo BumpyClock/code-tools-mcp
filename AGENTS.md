@@ -9,3 +9,6 @@ read-file : Use this tool to read a single file. You can specify the file path a
 edit : Use this tool to edit a file. You can specify the file path and the changes you want to make, and the tool will apply those changes to the file.
 
 ripgrep: cross platform ripgrep tool to search for text in files. You can specify a search query and the tool will return the lines that match the query.
+
+
+After every change run `pnpm check:fix` to ensure types are updated and everything is working as expected.
