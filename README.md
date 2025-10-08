@@ -184,6 +184,7 @@ Fast regex search using ripgrep binary (falls back to grep if unavailable).
 - Uses `--smart-case` by default when `ignore_case` not specified
 - Returns `truncated: true` if max_matches reached
 - Falls back to JavaScript grep if ripgrep unavailable
+- Captures stderr in `structuredContent.stderr`
 
 **Example:**
 ```typescript

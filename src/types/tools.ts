@@ -16,14 +16,14 @@ export type { EditInput } from '../tools/edit.js';
 export type { ReadManyFilesInput } from '../tools/read-many-files.js';
 
 // Re-export Zod schemas for runtime validation
-export { lsInput, lsShape } from '../tools/ls.js';
-export { readFileInput, readFileShape } from '../tools/read-file.js';
-export { writeFileInput, writeFileShape } from '../tools/write-file.js';
-export { grepInput, grepShape } from '../tools/grep.js';
-export { ripgrepInput, ripgrepShape } from '../tools/ripgrep.js';
-export { globInput, globShape } from '../tools/glob.js';
-export { editInput, editShape } from '../tools/edit.js';
-export { readManyFilesInput, readManyFilesShape } from '../tools/read-many-files.js';
+export { lsInput, lsShape, lsOutputShape } from '../tools/ls.js';
+export { readFileInput, readFileShape, readFileOutputShape } from '../tools/read-file.js';
+export { writeFileInput, writeFileShape, writeFileOutputShape } from '../tools/write-file.js';
+export { grepInput, grepShape, grepOutputShape } from '../tools/grep.js';
+export { ripgrepInput, ripgrepShape, ripgrepOutputShape } from '../tools/ripgrep.js';
+export { globInput, globShape, globOutputShape } from '../tools/glob.js';
+export { editInput, editShape, editOutputShape } from '../tools/edit.js';
+export { readManyFilesInput, readManyFilesShape, readManyFilesOutputShape } from '../tools/read-many-files.js';
 
 // Tool output types - based on MCP SDK's ToolResult type
 export interface ToolContent {
