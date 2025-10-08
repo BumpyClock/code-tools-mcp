@@ -1,0 +1,51 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { isText } from 'istextorbinary';
+import { z } from 'zod';
+import { relativize, resolveWithinWorkspace } from '../utils/workspace.js';
+import mime from 'mime-types';
+
+const MAX_BYTES = 2 * 1024 * 1024; // 2MB cap
+
+export const readFileShape = {
+  absolute_path: z.string().describe('Absolute path to the file within the workspace.'),
+  offset: z.number().int().min(0).optional().describe('Optional: starting line (0-based).'),
+  limit: z.number().int().min(1).max(2000).optional().describe('Optional: number of lines to return.'),
+};
+export const readFileInput = z.object(readFileShape);
+export type ReadFileInput = z.infer<typeof readFileInput>;
+
+export async function readFileTool({ absolute_path, offset, limit }: ReadFileInput) {
+  if (!path.isAbsolute(absolute_path)) {
+    return { content: [{ type: 'text' as const, text: `Path must be absolute: ${absolute_path}` }], structuredContent: { error: 'PATH_NOT_ABSOLUTE' } };
+  }
+  const abs = resolveWithinWorkspace(absolute_path);
+  const st = await fs.stat(abs).catch(() => null);
+  if (!st || !st.isFile()) {
+    return { content: [{ type: 'text' as const, text: `File not found or not a file: ${abs}` }], structuredContent: { error: 'FILE_NOT_FOUND' } };
+  }
+  if (st.size > MAX_BYTES) {
+    return { content: [{ type: 'text' as const, text: `File too large (${st.size} bytes). Cap is ${MAX_BYTES}.` }], structuredContent: { error: 'FILE_TOO_LARGE', size: st.size } };
+  }
+  const buf = await fs.readFile(abs);
+  const mimeType = (mime.lookup(abs) || 'text/plain').toString();
+  const isTextFile = isText(null, buf);
+  if (!isTextFile) {
+    const info = `Binary file (${mimeType}), size ${buf.byteLength} bytes.`;
+    return { content: [{ type: 'text' as const, text: info }], structuredContent: { path: abs, mimeType, binary: true, size: buf.byteLength } };
+  }
+  const text = buf.toString('utf8');
+  if (offset !== undefined || limit !== undefined) {
+    const lines = text.split(/\r?\n/);
+    const start = offset ?? 0;
+    const end = Math.min(lines.length, start + (limit ?? lines.length));
+    const slice = lines.slice(start, end).join('\n');
+    const header = `IMPORTANT: The file content may be truncated.\nStatus: Showing lines ${start + 1}-${end} of ${lines.length} total from ${relativize(abs)}.\nAction: To read more, call read_file with offset: ${end} and an appropriate limit.\n\n--- FILE CONTENT ---\n`;
+    return {
+      content: [{ type: 'text' as const, text: header + slice }],
+      structuredContent: { path: abs, lineStart: start + 1, lineEnd: end, totalLines: lines.length, mimeType },
+    };
+  }
+  return { content: [{ type: 'text' as const, text }], structuredContent: { path: abs, mimeType, binary: false } };
+}
+

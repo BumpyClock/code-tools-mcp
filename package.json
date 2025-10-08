@@ -1,0 +1,35 @@
+{
+  "name": "code-tools-mcp",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@joshua.litt/get-ripgrep": "^0.0.2",
+    "@modelcontextprotocol/sdk": "^1.19.1",
+    "diff": "^8.0.2",
+    "fast-glob": "^3.3.3",
+    "ignore": "^7.0.5",
+    "istextorbinary": "^9.5.0",
+    "mime-types": "^3.0.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/mime-types": "^3.0.1",
+    "@types/node": "^24.7.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

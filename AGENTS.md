@@ -1,0 +1,1 @@
+Use the code-tools MCP for reading one or many files, editing files, and listing files etc. This mcp server provides you with essential tools that are quick and reliable and make it easy to work with files and navigate codebases.
