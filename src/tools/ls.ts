@@ -48,18 +48,10 @@ export const lsOutputShape = {
 
 export async function lsTool(input: LsInput) {
 	const root = getWorkspaceRoot();
-	if (!path.isAbsolute(input.path)) {
-		return {
-			content: [
-				{
-					type: "text" as const,
-					text: `Error: Path must be absolute: ${input.path}`,
-				},
-			],
-			structuredContent: { error: "PATH_NOT_ABSOLUTE" },
-		};
-	}
-	const abs = resolveWithinWorkspace(input.path);
+	const candidate = path.isAbsolute(input.path)
+		? input.path
+		: path.join(root, input.path);
+	const abs = resolveWithinWorkspace(candidate);
 	const st = await fs.stat(abs).catch(() => null);
 	if (!st) {
 		return {
@@ -69,7 +61,13 @@ export async function lsTool(input: LsInput) {
 					text: `Error: Directory not found or inaccessible: ${abs}`,
 				},
 			],
-			structuredContent: { error: "FILE_NOT_FOUND" },
+			structuredContent: {
+				directory: abs,
+				entries: [],
+				gitIgnoredCount: 0,
+				summary: "Directory not found",
+				error: "FILE_NOT_FOUND",
+			},
 		};
 	}
 	if (!st.isDirectory()) {
@@ -80,7 +78,13 @@ export async function lsTool(input: LsInput) {
 					text: `Error: Path is not a directory: ${abs}`,
 				},
 			],
-			structuredContent: { error: "PATH_IS_NOT_A_DIRECTORY" },
+			structuredContent: {
+				directory: abs,
+				entries: [],
+				gitIgnoredCount: 0,
+				summary: "Path is not a directory",
+				error: "PATH_IS_NOT_A_DIRECTORY",
+			},
 		};
 	}
 

@@ -37,16 +37,18 @@ export type RipgrepInput = z.infer<typeof ripgrepInput>;
 
 // Output schema for structured content returned by this tool
 export const ripgrepOutputShape = {
-	matches: z.array(
-		z.object({
-			filePath: z.string(),
-			lineNumber: z.number(),
-			line: z.string(),
-		}),
-	),
+	matches: z
+		.array(
+			z.object({
+				filePath: z.string(),
+				lineNumber: z.number(),
+				line: z.string(),
+			}),
+		)
+		.optional(),
 	stderr: z.string().optional(),
-	summary: z.string(),
-	truncated: z.boolean(),
+	summary: z.string().optional(),
+	truncated: z.boolean().optional(),
 	maxMatches: z.number().optional(),
 	aborted: z.boolean().optional(),
 	error: z.string().optional(),

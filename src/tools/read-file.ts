@@ -37,7 +37,7 @@ export type ReadFileInput = z.infer<typeof readFileInput>;
 
 // Output schema for structured content returned by this tool
 export const readFileOutputShape = {
-	path: z.string(),
+	path: z.string().optional(),
 	mimeType: z.string().optional(),
 	binary: z.boolean().optional(),
 	size: z.number().optional(),
@@ -46,6 +46,7 @@ export const readFileOutputShape = {
 	totalLines: z.number().optional(),
 	summary: z.string().optional(),
 	nextOffset: z.number().optional(),
+	truncated: z.boolean().optional(),
 	error: z.string().optional(),
 };
 
@@ -125,9 +126,9 @@ export async function readFileTool({
 		const start = offset ?? 0;
 		const end = Math.min(lines.length, start + (limit ?? lines.length));
 		const slice = lines.slice(start, end).join("\n");
-		const header = `IMPORTANT: The file content may be truncated.\nStatus: Showing lines ${start + 1}-${end} of ${lines.length} total from ${relativize(abs)}.\nAction: To read more, call read_file with offset: ${end} and an appropriate limit.\n\n--- FILE CONTENT ---\n`;
+		const truncated = end < lines.length;
 		return {
-			content: [{ type: "text" as const, text: header + slice }],
+			content: [{ type: "text" as const, text: slice }],
 			structuredContent: {
 				path: abs,
 				lineStart: start + 1,
@@ -135,7 +136,8 @@ export async function readFileTool({
 				totalLines: lines.length,
 				mimeType,
 				summary: `Read lines ${start + 1}-${end} of ${lines.length}.`,
-				nextOffset: end < lines.length ? end : undefined,
+				nextOffset: truncated ? end : undefined,
+				truncated,
 			},
 		};
 	}

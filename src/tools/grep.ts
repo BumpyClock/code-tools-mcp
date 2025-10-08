@@ -41,15 +41,17 @@ export type GrepInput = z.infer<typeof grepInput>;
 
 // Output schema for structured content returned by this tool
 export const grepOutputShape = {
-	matches: z.array(
-		z.object({
-			filePath: z.string(),
-			lineNumber: z.number(),
-			line: z.string(),
-		}),
-	),
-	summary: z.string(),
-	truncated: z.boolean(),
+	matches: z
+		.array(
+			z.object({
+				filePath: z.string(),
+				lineNumber: z.number(),
+				line: z.string(),
+			}),
+		)
+		.optional(),
+	summary: z.string().optional(),
+	truncated: z.boolean().optional(),
 	maxMatches: z.number().optional(),
 	error: z.string().optional(),
 };

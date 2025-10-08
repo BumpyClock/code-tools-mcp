@@ -29,10 +29,10 @@ export type EditInput = z.infer<typeof editInput>;
 // Output schema for structured content returned by this tool
 export const editOutputShape = {
 	path: z.string().optional(),
-	applied: z.boolean(),
-	diff: z.string(),
-	occurrences: z.number(),
-	summary: z.string(),
+	applied: z.boolean().optional(),
+	diff: z.string().optional(),
+	occurrences: z.number().optional(),
+	summary: z.string().optional(),
 	error: z.string().optional(),
 };
 

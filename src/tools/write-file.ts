@@ -27,9 +27,9 @@ export type WriteFileInput = z.infer<typeof writeFileInput>;
 // Output schema for structured content returned by this tool
 export const writeFileOutputShape = {
 	path: z.string().optional(),
-	applied: z.boolean(),
+	applied: z.boolean().optional(),
 	diff: z.string().optional(),
-	summary: z.string(),
+	summary: z.string().optional(),
 	linesAdded: z.number().optional(),
 	linesRemoved: z.number().optional(),
 	modifiedByUser: z.boolean().optional(),
