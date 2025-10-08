@@ -148,7 +148,7 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 			output += chunk;
 			totalBytes = projected;
 			included.push(abs);
-		} catch (e) {
+		} catch (_e) {
 			skipped.push({ path: abs, reason: "read error" });
 			skipCounts.readError++;
 		}

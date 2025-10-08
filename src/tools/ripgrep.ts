@@ -174,7 +174,7 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 							root,
 							path.resolve(baseDir, evt.data.path.text),
 						);
-						const submatches = evt.data.submatches as Array<{
+						const _submatches = evt.data.submatches as Array<{
 							match: { text: string };
 						}>;
 						matches.push({
@@ -229,7 +229,7 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 	const byFile = new Map<string, Array<{ lineNumber: number; line: string }>>();
 	for (const m of matches) {
 		if (!byFile.has(m.filePath)) byFile.set(m.filePath, []);
-		byFile.get(m.filePath)!.push({ lineNumber: m.lineNumber, line: m.line });
+		byFile.get(m.filePath)?.push({ lineNumber: m.lineNumber, line: m.line });
 	}
 	for (const arr of byFile.values())
 		arr.sort((a, b) => a.lineNumber - b.lineNumber);

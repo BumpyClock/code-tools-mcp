@@ -94,8 +94,8 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 	if (input.regex) {
 		try {
 			rx = new RegExp(input.pattern, ignoreCase ? "i" : undefined);
-		} catch (e: any) {
-			const msg = `Invalid regular expression: ${e?.message || "unknown error"}`;
+		} catch (e: unknown) {
+			const msg = `Invalid regular expression: ${e instanceof Error ? e.message : String(e)}`;
 			return {
 				content: [{ type: "text" as const, text: msg }],
 				structuredContent: { error: "INVALID_REGEX", message: msg },
@@ -177,8 +177,8 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 			matchesByFile.set(match.filePath, []);
 		}
 		matchesByFile
-			.get(match.filePath)!
-			.push({ lineNumber: match.lineNumber, line: match.line });
+			.get(match.filePath)
+			?.push({ lineNumber: match.lineNumber, line: match.line });
 	}
 
 	// Build grouped text output

@@ -43,7 +43,7 @@ async function readIfExists(
 	try {
 		const buf = await fs.readFile(abs, "utf8");
 		return { exists: true, content: buf };
-	} catch (e) {
+	} catch (_e) {
 		return { exists: false, content: "" };
 	}
 }
@@ -71,27 +71,28 @@ function getDiffStats(
 	return { added, removed };
 }
 
-function mapFileSystemError(error: any): { message: string; code: string } {
-	if (error?.code === "EACCES") {
+function mapFileSystemError(error: unknown): { message: string; code: string } {
+	const err = error as NodeJS.ErrnoException | undefined;
+	if (err?.code === "EACCES") {
 		return {
 			message: "Permission denied: cannot write to file",
 			code: "PERMISSION_DENIED",
 		};
-	} else if (error?.code === "ENOSPC") {
+	} else if (err?.code === "ENOSPC") {
 		return { message: "No space left on device", code: "DISK_FULL" };
-	} else if (error?.code === "EISDIR") {
+	} else if (err?.code === "EISDIR") {
 		return {
 			message: "Cannot write to directory: path is a directory",
 			code: "IS_DIRECTORY",
 		};
-	} else if (error?.code === "ENOTDIR") {
+	} else if (err?.code === "ENOTDIR") {
 		return {
 			message: "Parent path is not a directory",
 			code: "PARENT_NOT_DIRECTORY",
 		};
 	}
 	return {
-		message: error?.message || "Write operation failed",
+		message: err?.message ?? "Write operation failed",
 		code: "WRITE_FAILED",
 	};
 }
@@ -112,7 +113,7 @@ export async function writeFileTool(input: WriteFileInput) {
 	let abs: string;
 	try {
 		abs = resolveWithinWorkspace(file_path);
-	} catch (e) {
+	} catch (_e) {
 		return {
 			content: [
 				{
