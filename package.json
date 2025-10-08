@@ -15,7 +15,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "code-tools-mcp": "./dist/index.js"
+    "code-tools-mcp": "./dist/cli.js"
   },
   "files": [
     "dist",
