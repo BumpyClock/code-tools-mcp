@@ -10,7 +10,6 @@ export const globShape = {
   path: z.string().optional().describe('Directory to search within; if omitted, search workspace root.'),
   case_sensitive: z.boolean().optional().describe('Match case sensitively (default false).'),
   respect_git_ignore: z.boolean().optional().describe('Respect .gitignore (default true).'),
-  respect_gemini_ignore: z.boolean().optional().describe('Respect .geminiignore (default true).'),
 };
 export const globInput = z.object(globShape);
 export type GlobInput = z.infer<typeof globInput>;
@@ -18,10 +17,7 @@ export type GlobInput = z.infer<typeof globInput>;
 export async function globTool(input: GlobInput) {
   const root = getWorkspaceRoot();
   const baseDir = input.path ? resolveWithinWorkspace(path.isAbsolute(input.path) ? input.path : path.join(root, input.path)) : root;
-  const ig = await buildIgnoreFilter({
-    respectGitIgnore: input.respect_git_ignore ?? true,
-    respectGeminiIgnore: input.respect_gemini_ignore ?? true,
-  });
+  const ig = await buildIgnoreFilter({ respectGitIgnore: input.respect_git_ignore ?? true });
 
   const entries = await fg(input.pattern, {
     cwd: baseDir,
@@ -45,21 +41,13 @@ export async function globTool(input: GlobInput) {
   }
 
   if (filtered.length === 0) {
-    return { content: [{ type: 'text' as const, text: `No files found matching "${input.pattern}" in ${path.relative(root, baseDir) || '.'}` }], structuredContent: { files: [] } };
+    return { content: [{ type: 'text' as const, text: `No files found matching "${input.pattern}" in ${path.relative(root, baseDir) || '.'}` }], structuredContent: { files: [], summary: 'No files found.' } };
   }
 
-  const now = Date.now();
-  const recentMs = 24 * 60 * 60 * 1000;
-  filtered.sort((a, b) => {
-    const aRecent = now - (a.mtimeMs || 0) < recentMs;
-    const bRecent = now - (b.mtimeMs || 0) < recentMs;
-    if (aRecent && bRecent) return b.mtimeMs - a.mtimeMs;
-    if (aRecent) return -1;
-    if (bRecent) return 1;
-    return a.full.localeCompare(b.full);
-  });
+  // Sort newest-first by modification time for parity with reference behavior
+  filtered.sort((a, b) => b.mtimeMs - a.mtimeMs);
 
-  const text = filtered.map((f) => f.full).join('\n');
-  return { content: [{ type: 'text' as const, text }], structuredContent: { files: filtered.map((f) => f.full) } };
+  const files = filtered.map((f) => f.full);
+  const text = files.join('\n');
+  return { content: [{ type: 'text' as const, text }], structuredContent: { files, summary: `Found ${files.length} matching file(s).` } };
 }
-

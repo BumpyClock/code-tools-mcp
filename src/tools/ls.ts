@@ -10,7 +10,6 @@ export const lsShape = {
   file_filtering_options: z
     .object({
       respect_git_ignore: z.boolean().optional(),
-      respect_gemini_ignore: z.boolean().optional(),
     })
     .optional(),
 };
@@ -41,24 +40,10 @@ export async function lsTool(input: LsInput) {
   }
 
   const respectGit = input.file_filtering_options?.respect_git_ignore ?? true;
-  const respectGemini = input.file_filtering_options?.respect_gemini_ignore ?? true;
-  const ig = await buildIgnoreFilter({
-    respectGitIgnore: respectGit,
-    respectGeminiIgnore: respectGemini,
-  } satisfies FilteringOptions);
-  // Separate filters to report per-source ignore counts
-  const igGitOnly = await buildIgnoreFilter({
-    respectGitIgnore: respectGit,
-    respectGeminiIgnore: false,
-  } satisfies FilteringOptions);
-  const igGeminiOnly = await buildIgnoreFilter({
-    respectGitIgnore: false,
-    respectGeminiIgnore: respectGemini,
-  } satisfies FilteringOptions);
+  const ig = await buildIgnoreFilter({ respectGitIgnore: respectGit } satisfies FilteringOptions);
 
   const names = await fs.readdir(abs);
   let gitIgnoredCount = 0;
-  let geminiIgnoredCount = 0;
   const entries = [] as Array<{ name: string; path: string; isDirectory: boolean; size: number; modifiedTime: string }>;
 
   for (const name of names) {
@@ -67,11 +52,7 @@ export async function lsTool(input: LsInput) {
 
     // ignore lib works with posixish paths; convert separators
     const relPosix = relToRoot.split(path.sep).join('/');
-    if (ig.ignores(relPosix)) {
-      if (respectGit && igGitOnly.ignores(relPosix)) gitIgnoredCount += 1;
-      if (respectGemini && igGeminiOnly.ignores(relPosix)) geminiIgnoredCount += 1;
-      continue;
-    }
+    if (ig.ignores(relPosix)) { gitIgnoredCount += 1; continue; }
     if (matchCustomIgnore(name, input.ignore)) continue;
     try {
       const s = await fs.stat(full);
@@ -90,11 +71,10 @@ export async function lsTool(input: LsInput) {
   let text = `Directory listing for ${relativize(abs)}:\n${listing}`;
   const ignoredMsgs = [] as string[];
   if (gitIgnoredCount > 0) ignoredMsgs.push(`${gitIgnoredCount} ignored by rules`);
-  if (geminiIgnoredCount > 0) ignoredMsgs.push(`${geminiIgnoredCount} gemini-ignored`);
   if (ignoredMsgs.length) text += `\n\n(${ignoredMsgs.join(', ')})`;
 
   return {
     content: [{ type: 'text' as const, text }],
-    structuredContent: { directory: abs, entries, gitIgnoredCount, geminiIgnoredCount },
+    structuredContent: { directory: abs, entries, gitIgnoredCount, summary: `Listed ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}.` },
   };
 }

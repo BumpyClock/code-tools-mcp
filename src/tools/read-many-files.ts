@@ -12,7 +12,7 @@ export const readManyFilesShape = {
   exclude: z.array(z.string()).optional().describe('Glob patterns to exclude.'),
   useDefaultExcludes: z.boolean().optional().describe('Apply default excludes (node_modules, dist, .git, etc.). Default true.'),
   file_filtering_options: z
-    .object({ respect_git_ignore: z.boolean().optional(), respect_gemini_ignore: z.boolean().optional() })
+    .object({ respect_git_ignore: z.boolean().optional() })
     .optional(),
 };
 export const readManyFilesInput = z.object(readManyFilesShape);
@@ -30,10 +30,7 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
     ...(input.useDefaultExcludes === false ? [] : DEFAULT_EXCLUDES),
     ...(input.exclude ?? []),
   ];
-  const ig = await buildIgnoreFilter({
-    respectGitIgnore: input.file_filtering_options?.respect_git_ignore ?? true,
-    respectGeminiIgnore: input.file_filtering_options?.respect_gemini_ignore ?? true,
-  });
+  const ig = await buildIgnoreFilter({ respectGitIgnore: input.file_filtering_options?.respect_git_ignore ?? true });
 
   const files = new Set<string>();
   for (const pattern of searchPatterns) {
@@ -74,6 +71,5 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
   }
 
   output += TERMINATOR;
-  return { content: [{ type: 'text' as const, text: output }], structuredContent: { files: included, skipped, totalBytes } };
+  return { content: [{ type: 'text' as const, text: output }], structuredContent: { files: included, skipped, totalBytes, summary: `Read ${included.length} file(s).` } };
 }
-

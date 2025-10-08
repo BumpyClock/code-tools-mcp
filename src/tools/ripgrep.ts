@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { getWorkspaceRoot, resolveWithinWorkspace } from '../utils/workspace.js';
@@ -12,6 +11,7 @@ export const ripgrepShape = {
   path: z.string().optional().describe('Directory to search (relative or absolute).'),
   include: z.union([z.string(), z.array(z.string())]).optional().describe('Glob include pattern(s), e.g. **/*.{ts,tsx}'),
   exclude: z.union([z.string(), z.array(z.string())]).optional().describe('Glob exclude pattern(s), e.g. **/dist/**'),
+  ignore_case: z.boolean().optional().describe('Case-insensitive search (default true).'),
 };
 export const ripgrepInput = z.object(ripgrepShape);
 export type RipgrepInput = z.infer<typeof ripgrepInput>;
@@ -61,10 +61,11 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
     const excludeStr = Array.isArray(input.exclude)
       ? `{${input.exclude.join(',')}}`
       : input.exclude;
-    return grepTool({ pattern: input.pattern, path: path.relative(root, baseDir) || '.', include: includeStr, exclude: excludeStr } as z.infer<typeof grepInput>, signal);
+    return grepTool({ pattern: input.pattern, path: path.relative(root, baseDir) || '.', include: includeStr, exclude: excludeStr, regex: true, ignore_case: input.ignore_case !== false } as z.infer<typeof grepInput>, signal);
   }
 
   const args = ['--json', '--line-number'];
+  if (input.ignore_case !== false) args.push('--ignore-case');
   // include globs
   const includes = input.include ? (Array.isArray(input.include) ? input.include : [input.include]) : [];
   for (const inc of includes) args.push('-g', inc);
@@ -73,12 +74,6 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
   for (const exc of excludes) args.push('-g', `!${exc}`);
   // ripgrep respects .gitignore by default; include hidden files but still honor ignore rules
   args.push('--hidden');
-  // If a .geminiignore exists at the workspace root, honor it for parity with other tools
-  try {
-    const gmi = path.join(root, '.geminiignore');
-    await fs.access(gmi);
-    args.push('--ignore-file', gmi);
-  } catch {}
   args.push(input.pattern);
   args.push('.');
 
@@ -127,10 +122,10 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 
   if (matches.length === 0) {
     const where = path.relative(root, baseDir) || '.';
-    const filterDesc = includes.length ? ` (filter: ${includes.join(', ')})` : '';
-    const excludeDesc = excludes.length ? ` (exclude: ${excludes.join(', ')})` : '';
-    const msg = `No matches for "${input.pattern}" in ${where}${filterDesc}${excludeDesc}.`;
-    return { content: [{ type: 'text' as const, text: msg }], structuredContent: { matches: [], stderr: stderrBuf || undefined } };
+  const filterDesc = includes.length ? ` (filter: ${includes.join(', ')})` : '';
+  const excludeDesc = excludes.length ? ` (exclude: ${excludes.join(', ')})` : '';
+  const msg = `No matches for "${input.pattern}" in ${where}${filterDesc}${excludeDesc}.`;
+    return { content: [{ type: 'text' as const, text: msg }], structuredContent: { matches: [], stderr: stderrBuf || undefined, summary: 'No matches found.' } };
   }
 
   const byFile = new Map<string, Array<{ lineNumber: number; line: string }>>();
@@ -148,5 +143,6 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
   }
   if (matches.length >= MAX) text += `(limited to ${MAX} matches)\n`;
 
-  return { content: [{ type: 'text' as const, text: text.trimEnd() }], structuredContent: { matches, stderr: stderrBuf || undefined } };
+  const summary = `Found ${matches.length} match${matches.length === 1 ? '' : 'es'}.`;
+  return { content: [{ type: 'text' as const, text: text.trimEnd() }], structuredContent: { matches, stderr: stderrBuf || undefined, summary } };
 }

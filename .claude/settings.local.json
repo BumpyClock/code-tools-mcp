@@ -3,7 +3,10 @@
     "allow": [
       "mcp__code-tools-mcp__list_directory",
       "mcp__code-tools-mcp__read_many_files",
-      "mcp__sequentialthinking__sequentialthinking"
+      "mcp__sequentialthinking__sequentialthinking",
+      "mcp__code-tools-mcp__glob",
+      "mcp__code-tools-mcp__read_file",
+      "mcp__code-tools-mcp__edit"
     ],
     "deny": [],
     "ask": []

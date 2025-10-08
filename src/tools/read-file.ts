@@ -3,6 +3,7 @@ import path from 'node:path';
 import { isText } from 'istextorbinary';
 import { z } from 'zod';
 import { relativize, resolveWithinWorkspace } from '../utils/workspace.js';
+import { buildIgnoreFilter } from '../utils/ignore.js';
 import mime from 'mime-types';
 
 const MAX_BYTES = 2 * 1024 * 1024; // 2MB cap
@@ -20,6 +21,13 @@ export async function readFileTool({ absolute_path, offset, limit }: ReadFileInp
     return { content: [{ type: 'text' as const, text: `Path must be absolute: ${absolute_path}` }], structuredContent: { error: 'PATH_NOT_ABSOLUTE' } };
   }
   const abs = resolveWithinWorkspace(absolute_path);
+  // Respect .gitignore entries for safety/clarity
+  const ig = await buildIgnoreFilter({ respectGitIgnore: true });
+  const relPosix = relativize(abs).split(path.sep).join('/');
+  if (ig.ignores(relPosix)) {
+    const msg = `File is ignored by .gitignore: ${relativize(abs)}`;
+    return { content: [{ type: 'text' as const, text: msg }], structuredContent: { error: 'FILE_IGNORED', path: abs } };
+  }
   const st = await fs.stat(abs).catch(() => null);
   if (!st || !st.isFile()) {
     return { content: [{ type: 'text' as const, text: `File not found or not a file: ${abs}` }], structuredContent: { error: 'FILE_NOT_FOUND' } };
@@ -48,8 +56,8 @@ export async function readFileTool({ absolute_path, offset, limit }: ReadFileInp
     const header = `IMPORTANT: The file content may be truncated.\nStatus: Showing lines ${start + 1}-${end} of ${lines.length} total from ${relativize(abs)}.\nAction: To read more, call read_file with offset: ${end} and an appropriate limit.\n\n--- FILE CONTENT ---\n`;
     return {
       content: [{ type: 'text' as const, text: header + slice }],
-      structuredContent: { path: abs, lineStart: start + 1, lineEnd: end, totalLines: lines.length, mimeType },
+      structuredContent: { path: abs, lineStart: start + 1, lineEnd: end, totalLines: lines.length, mimeType, summary: `Read lines ${start + 1}-${end} of ${lines.length}.` },
     };
   }
-  return { content: [{ type: 'text' as const, text }], structuredContent: { path: abs, mimeType, binary: false } };
+  return { content: [{ type: 'text' as const, text }], structuredContent: { path: abs, mimeType, binary: false, summary: `Read ${text.split(/\r?\n/).length} line(s).` } };
 }
