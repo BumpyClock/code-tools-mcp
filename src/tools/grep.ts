@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import fg from 'fast-glob';
 import { z } from 'zod';
+import { isText } from 'istextorbinary';
 import { buildIgnoreFilter } from '../utils/ignore.js';
 import { getWorkspaceRoot, resolveWithinWorkspace } from '../utils/workspace.js';
 
@@ -9,6 +10,7 @@ export const grepShape = {
   pattern: z.string().describe('Pattern to search for (plain text).'),
   path: z.string().optional().describe('Optional directory path relative to workspace.'),
   include: z.string().optional().describe('Optional glob filter, e.g. **/*.{ts,tsx,js,jsx}'),
+  exclude: z.string().optional().describe('Optional glob to exclude, e.g. **/dist/**'),
 };
 export const grepInput = z.object(grepShape);
 export type GrepInput = z.infer<typeof grepInput>;
@@ -18,7 +20,7 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
   const baseDir = input.path ? resolveWithinWorkspace(path.resolve(root, input.path)) : root;
   const ig = await buildIgnoreFilter();
   const include = input.include ?? '**/*';
-  const files = await fg(include, { cwd: baseDir, absolute: true, dot: true });
+  const files = await fg(include, { cwd: baseDir, absolute: true, dot: true, ignore: input.exclude ? [input.exclude] : undefined });
   const matches: Array<{ filePath: string; lineNumber: number; line: string }> = [];
 
   outer: for (const file of files) {
@@ -29,7 +31,9 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
       const st = await fs.stat(file);
       if (!st.isFile()) continue;
       if (st.size > 1024 * 1024) continue; // 1MB cap per file
-      const text = await fs.readFile(file, 'utf8');
+      const buf = await fs.readFile(file);
+      if (!isText(null, buf)) continue; // skip binaries
+      const text = buf.toString('utf8');
       const lines = text.split(/\r?\n/);
       for (let i = 0; i < lines.length; i++) {
         if (lines[i].includes(input.pattern)) {
@@ -46,4 +50,3 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
   const text = matches.map((m) => `${m.filePath}:${m.lineNumber}: ${m.line}`).join('\n');
   return { content: [{ type: 'text' as const, text }], structuredContent: { matches } };
 }
-

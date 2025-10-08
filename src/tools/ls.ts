@@ -40,14 +40,25 @@ export async function lsTool(input: LsInput) {
     };
   }
 
+  const respectGit = input.file_filtering_options?.respect_git_ignore ?? true;
+  const respectGemini = input.file_filtering_options?.respect_gemini_ignore ?? true;
   const ig = await buildIgnoreFilter({
-    respectGitIgnore: input.file_filtering_options?.respect_git_ignore ?? true,
-    respectGeminiIgnore: input.file_filtering_options?.respect_gemini_ignore ?? true,
+    respectGitIgnore: respectGit,
+    respectGeminiIgnore: respectGemini,
+  } satisfies FilteringOptions);
+  // Separate filters to report per-source ignore counts
+  const igGitOnly = await buildIgnoreFilter({
+    respectGitIgnore: respectGit,
+    respectGeminiIgnore: false,
+  } satisfies FilteringOptions);
+  const igGeminiOnly = await buildIgnoreFilter({
+    respectGitIgnore: false,
+    respectGeminiIgnore: respectGemini,
   } satisfies FilteringOptions);
 
   const names = await fs.readdir(abs);
   let gitIgnoredCount = 0;
-  let geminiIgnoredCount = 0; // indistinguishable here; we lump into ignore totals from ig
+  let geminiIgnoredCount = 0;
   const entries = [] as Array<{ name: string; path: string; isDirectory: boolean; size: number; modifiedTime: string }>;
 
   for (const name of names) {
@@ -57,7 +68,8 @@ export async function lsTool(input: LsInput) {
     // ignore lib works with posixish paths; convert separators
     const relPosix = relToRoot.split(path.sep).join('/');
     if (ig.ignores(relPosix)) {
-      gitIgnoredCount += 1;
+      if (respectGit && igGitOnly.ignores(relPosix)) gitIgnoredCount += 1;
+      if (respectGemini && igGeminiOnly.ignores(relPosix)) geminiIgnoredCount += 1;
       continue;
     }
     if (matchCustomIgnore(name, input.ignore)) continue;

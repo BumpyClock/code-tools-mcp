@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { getWorkspaceRoot, resolveWithinWorkspace } from '../utils/workspace.js';
@@ -9,7 +10,8 @@ import { downloadRipGrep } from '@joshua.litt/get-ripgrep';
 export const ripgrepShape = {
   pattern: z.string().describe('Regular expression to search for.'),
   path: z.string().optional().describe('Directory to search (relative or absolute).'),
-  include: z.string().optional().describe('Glob include pattern, e.g. **/*.{ts,tsx}'),
+  include: z.union([z.string(), z.array(z.string())]).optional().describe('Glob include pattern(s), e.g. **/*.{ts,tsx}'),
+  exclude: z.union([z.string(), z.array(z.string())]).optional().describe('Glob exclude pattern(s), e.g. **/dist/**'),
 };
 export const ripgrepInput = z.object(ripgrepShape);
 export type RipgrepInput = z.infer<typeof ripgrepInput>;
@@ -53,15 +55,30 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
   }
   if (!rgCmd) {
     // Fallback to JS grep implementation
-    return grepTool({ pattern: input.pattern, path: path.relative(root, baseDir) || '.', include: input.include } as z.infer<typeof grepInput>, signal);
+    const includeStr = Array.isArray(input.include)
+      ? `{${input.include.join(',')}}`
+      : input.include;
+    const excludeStr = Array.isArray(input.exclude)
+      ? `{${input.exclude.join(',')}}`
+      : input.exclude;
+    return grepTool({ pattern: input.pattern, path: path.relative(root, baseDir) || '.', include: includeStr, exclude: excludeStr } as z.infer<typeof grepInput>, signal);
   }
 
   const args = ['--json', '--line-number'];
-  if (input.include) {
-    args.push('-g', input.include);
-  }
+  // include globs
+  const includes = input.include ? (Array.isArray(input.include) ? input.include : [input.include]) : [];
+  for (const inc of includes) args.push('-g', inc);
+  // exclude globs
+  const excludes = input.exclude ? (Array.isArray(input.exclude) ? input.exclude : [input.exclude]) : [];
+  for (const exc of excludes) args.push('-g', `!${exc}`);
   // ripgrep respects .gitignore by default; include hidden files but still honor ignore rules
   args.push('--hidden');
+  // If a .geminiignore exists at the workspace root, honor it for parity with other tools
+  try {
+    const gmi = path.join(root, '.geminiignore');
+    await fs.access(gmi);
+    args.push('--ignore-file', gmi);
+  } catch {}
   args.push(input.pattern);
   args.push('.');
 
@@ -110,7 +127,10 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 
   if (matches.length === 0) {
     const where = path.relative(root, baseDir) || '.';
-    return { content: [{ type: 'text' as const, text: `No matches for "${input.pattern}" in ${where}${input.include ? ` (filter: ${input.include})` : ''}.` }], structuredContent: { matches: [] } };
+    const filterDesc = includes.length ? ` (filter: ${includes.join(', ')})` : '';
+    const excludeDesc = excludes.length ? ` (exclude: ${excludes.join(', ')})` : '';
+    const msg = `No matches for "${input.pattern}" in ${where}${filterDesc}${excludeDesc}.`;
+    return { content: [{ type: 'text' as const, text: msg }], structuredContent: { matches: [], stderr: stderrBuf || undefined } };
   }
 
   const byFile = new Map<string, Array<{ lineNumber: number; line: string }>>();
@@ -128,5 +148,5 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
   }
   if (matches.length >= MAX) text += `(limited to ${MAX} matches)\n`;
 
-  return { content: [{ type: 'text' as const, text: text.trimEnd() }], structuredContent: { matches } };
+  return { content: [{ type: 'text' as const, text: text.trimEnd() }], structuredContent: { matches, stderr: stderrBuf || undefined } };
 }

@@ -28,7 +28,12 @@ export async function readFileTool({ absolute_path, offset, limit }: ReadFileInp
     return { content: [{ type: 'text' as const, text: `File too large (${st.size} bytes). Cap is ${MAX_BYTES}.` }], structuredContent: { error: 'FILE_TOO_LARGE', size: st.size } };
   }
   const buf = await fs.readFile(abs);
-  const mimeType = (mime.lookup(abs) || 'text/plain').toString();
+  let mimeType = (mime.lookup(abs) || 'text/plain').toString();
+  // Correct misleading MIME for TypeScript files from mime-types (video/mp2t)
+  const ext = path.extname(abs).toLowerCase();
+  if (ext === '.ts' || ext === '.tsx') {
+    mimeType = 'text/typescript';
+  }
   const isTextFile = isText(null, buf);
   if (!isTextFile) {
     const info = `Binary file (${mimeType}), size ${buf.byteLength} bytes.`;
@@ -48,4 +53,3 @@ export async function readFileTool({ absolute_path, offset, limit }: ReadFileInp
   }
   return { content: [{ type: 'text' as const, text }], structuredContent: { path: abs, mimeType, binary: false } };
 }
-

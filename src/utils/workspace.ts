@@ -60,8 +60,16 @@ export function resolveWithinWorkspace(p: string): string {
   const root = getWorkspaceRoot();
   const abs = path.isAbsolute(p) ? p : path.resolve(root, p);
   const norm = path.normalize(abs);
-  const rootNorm = path.normalize(root + path.sep);
-  if (!norm.startsWith(rootNorm) && norm !== root) {
+  const rootWithSep = path.normalize(root + path.sep);
+
+  // On Windows, filesystems are typically case-insensitive. Normalize case
+  // to prevent false rejections for paths that differ only by letter casing.
+  const isWin = process.platform === 'win32';
+  const normCmp = isWin ? norm.toLowerCase() : norm;
+  const rootWithSepCmp = isWin ? rootWithSep.toLowerCase() : rootWithSep;
+  const rootCmp = isWin ? path.normalize(root).toLowerCase() : path.normalize(root);
+
+  if (!normCmp.startsWith(rootWithSepCmp) && normCmp !== rootCmp) {
     throw new Error(`Path is outside workspace root: ${p}`);
   }
   return norm;
