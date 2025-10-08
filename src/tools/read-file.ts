@@ -17,6 +17,21 @@ export const readFileShape = {
 export const readFileInput = z.object(readFileShape);
 export type ReadFileInput = z.infer<typeof readFileInput>;
 
+// Output schema for structured content returned by this tool
+export const readFileOutputShape = {
+  path: z.string(),
+  mimeType: z.string().optional(),
+  binary: z.boolean().optional(),
+  size: z.number().optional(),
+  lineStart: z.number().optional(),
+  lineEnd: z.number().optional(),
+  totalLines: z.number().optional(),
+  summary: z.string().optional(),
+  nextOffset: z.number().optional(),
+  error: z.string().optional(),
+};
+
+
 export async function readFileTool({ absolute_path, offset, limit, allow_ignored }: ReadFileInput) {
   if (!path.isAbsolute(absolute_path)) {
     return { content: [{ type: 'text' as const, text: `Path must be absolute: ${absolute_path}` }], structuredContent: { error: 'PATH_NOT_ABSOLUTE' } };
@@ -82,3 +97,4 @@ export async function readFileTool({ absolute_path, offset, limit, allow_ignored
     }
   };
 }
+

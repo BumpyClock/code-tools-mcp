@@ -18,6 +18,20 @@ export const grepShape = {
 export const grepInput = z.object(grepShape);
 export type GrepInput = z.infer<typeof grepInput>;
 
+// Output schema for structured content returned by this tool
+export const grepOutputShape = {
+  matches: z.array(z.object({
+    filePath: z.string(),
+    lineNumber: z.number(),
+    line: z.string(),
+  })),
+  summary: z.string(),
+  truncated: z.boolean(),
+  maxMatches: z.number().optional(),
+  error: z.string().optional(),
+};
+
+
 export async function grepTool(input: GrepInput, signal?: AbortSignal) {
   const root = getWorkspaceRoot();
   const baseDir = input.path ? resolveWithinWorkspace(path.resolve(root, input.path)) : root;
@@ -138,3 +152,4 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
     } 
   };
 }
+

@@ -14,6 +14,15 @@ export const globShape = {
 export const globInput = z.object(globShape);
 export type GlobInput = z.infer<typeof globInput>;
 
+// Output schema for structured content returned by this tool
+export const globOutputShape = {
+  files: z.array(z.string()),
+  summary: z.string(),
+  gitIgnoredCount: z.number().optional(),
+  error: z.string().optional(),
+};
+
+
 export async function globTool(input: GlobInput) {
   const root = getWorkspaceRoot();
   const baseDir = input.path ? resolveWithinWorkspace(path.isAbsolute(input.path) ? input.path : path.join(root, input.path)) : root;
@@ -86,3 +95,4 @@ export async function globTool(input: GlobInput) {
     } 
   };
 }
+

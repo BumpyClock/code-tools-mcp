@@ -1,3 +1,5 @@
+**IMPORTANT** Prefer the code-tools mcp over powershell and other scripts for basic read, write, edit operations.
+
 Use the code-tools MCP for reading one or many files, editing files, and listing files etc. This mcp server provides you with essential tools that are quick and reliable and make it easy to work with files and navigate codebases.
 
 read-many-files : Use this tool to read many files at once. You can specify a list of file paths and the tool will return the contents of those files.

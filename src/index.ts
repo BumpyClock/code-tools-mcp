@@ -3,14 +3,14 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-import { lsTool, lsInput, lsShape } from './tools/ls.js';
-import { readFileTool, readFileInput, readFileShape } from './tools/read-file.js';
-import { writeFileTool, writeFileInput, writeFileShape } from './tools/write-file.js';
-import { grepTool, grepInput, grepShape } from './tools/grep.js';
-import { ripgrepTool, ripgrepInput, ripgrepShape } from './tools/ripgrep.js';
-import { globTool, globInput, globShape } from './tools/glob.js';
-import { editTool, editInput, editShape } from './tools/edit.js';
-import { readManyFilesTool, readManyFilesInput, readManyFilesShape } from './tools/read-many-files.js';
+import { lsTool, lsInput, lsShape, lsOutputShape } from './tools/ls.js';
+import { readFileTool, readFileInput, readFileShape, readFileOutputShape } from './tools/read-file.js';
+import { writeFileTool, writeFileInput, writeFileShape, writeFileOutputShape } from './tools/write-file.js';
+import { grepTool, grepInput, grepShape, grepOutputShape } from './tools/grep.js';
+import { ripgrepTool, ripgrepInput, ripgrepShape, ripgrepOutputShape } from './tools/ripgrep.js';
+import { globTool, globInput, globShape, globOutputShape } from './tools/glob.js';
+import { editTool, editInput, editShape, editOutputShape } from './tools/edit.js';
+import { readManyFilesTool, readManyFilesInput, readManyFilesShape, readManyFilesOutputShape } from './tools/read-many-files.js';
 
 const server = new McpServer({
   name: 'code-tools-mcp',
@@ -23,6 +23,7 @@ server.registerTool(
     title: 'List Directory',
     description: 'Non-recursive listing; dirs first; respects .gitignore.',
     inputSchema: lsShape,
+    outputSchema: lsOutputShape,
   },
   async (input: z.infer<typeof lsInput>) => lsTool(input)
 );
@@ -33,6 +34,7 @@ server.registerTool(
     title: 'Read File',
     description: 'Read a file; text/binary aware; optional pagination.',
     inputSchema: readFileShape,
+    outputSchema: readFileOutputShape,
   },
   async (input: z.infer<typeof readFileInput>) => readFileTool(input)
 );
@@ -43,6 +45,7 @@ server.registerTool(
     title: 'Write File',
     description: 'Create/overwrite file; preview with apply=false; workspace-safe.',
     inputSchema: writeFileShape,
+    outputSchema: writeFileOutputShape,
   },
   async (input: z.infer<typeof writeFileInput>) => writeFileTool(input)
 );
@@ -51,8 +54,9 @@ server.registerTool(
   'grep',
   {
     title: 'Grep',
-    description: 'Text/regex search; case-insensitive default; skips binaries; respects .gitignore.',
+    description: 'Text/regex search; smart-case default; skips binaries; respects .gitignore.',
     inputSchema: grepShape,
+    outputSchema: grepOutputShape,
   },
   async (input: z.infer<typeof grepInput>) => grepTool(input)
 );
@@ -63,6 +67,7 @@ server.registerTool(
     title: 'Ripgrep',
     description: 'Fast regex search via ripgrep (JS fallback); include/exclude globs; 20k cap.',
     inputSchema: ripgrepShape,
+    outputSchema: ripgrepOutputShape,
   },
   async (input: z.infer<typeof ripgrepInput>, { signal }) => ripgrepTool(input, signal)
 );
@@ -73,6 +78,7 @@ server.registerTool(
     title: 'Glob',
     description: 'Match files by glob; newest-first; respects .gitignore.',
     inputSchema: globShape,
+    outputSchema: globOutputShape,
   },
   async (input: z.infer<typeof globInput>) => globTool(input)
 );
@@ -83,6 +89,7 @@ server.registerTool(
     title: 'Edit',
     description: 'Targeted text replace; preview (apply=false); bulk via replace_all.',
     inputSchema: editShape,
+    outputSchema: editOutputShape,
   },
   async (input: z.infer<typeof editInput>) => editTool(input)
 );
@@ -93,6 +100,7 @@ server.registerTool(
     title: 'Read Many Files',
     description: 'Read many files by glob; concatenated; skips binaries; 2MB cap.',
     inputSchema: readManyFilesShape,
+    outputSchema: readManyFilesOutputShape,
   },
   async (input: z.infer<typeof readManyFilesInput>) => readManyFilesTool(input)
 );

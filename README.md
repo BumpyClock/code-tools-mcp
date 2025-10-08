@@ -1,7 +1,11 @@
 **Code Tools MCP Server**
 
 - Local-only MCP server exposing core coding tools for LLMs via STDIO.
-- Tools: `list_directory`, `read_file`, `write_file`, `search`.
+- Tools: `list_directory`, `read_file`, `write_file`, `grep`, `ripgrep`, `glob`, `edit`, `read_many_files`.
+
+Codex CLI on windows sort of sucks because it relies on writing PS / Python scripts for basic read, write, grep operations. This MCP server exposes those standard tools making Codex CLI faster on Windows. You can use it on Linux or Mac, it will work but may not be necessary. 
+
+This is without warranty, any issues or bugs should be reported to the repository but be aware of the risks and use it at your own risk.
 
 **Install**
 
@@ -11,6 +15,16 @@
 **Run**
 
 - `code-tools-mcp --root C:/path/to/workspace`
+
+
+**CODEX CLI Config Example**
+```
+[mcp_servers.code-tools]
+command = "{path to npm.cmd}"
+args = [ "-y", "code-tools-mcp"]
+env = { APPDATA = "C:\\Users\\{username}\\AppData\\Roaming", LOCALAPPDATA = "C:\\Users\\{username}\\AppData\\Local", HOME = "C:\\Users\\{username}", SystemRoot = "C:\\Windows", ComSpec = "C:\\Windows\\System32\\cmd.exe" }
+startup_timeout_ms = 20_000
+```
 
 Workspace root is auto-detected:
 - If `CODE_TOOLS_MCP_ROOT` is set, it wins.
@@ -50,14 +64,7 @@ Add to your Claude config JSON:
 }
 ```
 
-**CODEX CLI Config Example**
-```
-[mcp_servers.code-tools]
-command = "C:\\Users\\{username}\\AppData\\Local\\fnm_multishells\\16024_1758470138359\\node.exe"
-args = [ "C:\\Users\\{username}\\Projects\\code-tools-mcp\\dist\\index.js"]
-env = { APPDATA = "C:\\Users\\{username}\\AppData\\Roaming", LOCALAPPDATA = "C:\\Users\\{username}\\AppData\\Local", HOME = "C:\\Users\\{username}", SystemRoot = "C:\\Windows", ComSpec = "C:\\Windows\\System32\\cmd.exe" }
-startup_timeout_ms = 20_000
-```
+
 
 **Notes**
 
@@ -260,6 +267,8 @@ await client.callTool('read_many_files', {
 ---
 
 ## Using These Tools from an MCP Client
+
+> Tool discovery: clients call `tools/list` (supports cursor pagination) and may receive `tools/list_changed` when the set changes.
 
 ### TypeScript Example
 

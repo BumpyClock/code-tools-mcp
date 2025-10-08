@@ -16,6 +16,22 @@ export const lsShape = {
 export const lsInput = z.object(lsShape);
 export type LsInput = z.infer<typeof lsInput>;
 
+
+// Output schema for structured content returned by this tool
+export const lsOutputShape = {
+  directory: z.string().optional(),
+  entries: z.array(z.object({
+    name: z.string(),
+    path: z.string(),
+    isDirectory: z.boolean(),
+    size: z.number(),
+    modifiedTime: z.string(),
+  })),
+  gitIgnoredCount: z.number().optional(),
+  summary: z.string(),
+  error: z.string().optional(),
+};
+
 export async function lsTool(input: LsInput) {
   const root = getWorkspaceRoot();
   if (!path.isAbsolute(input.path)) {
@@ -88,3 +104,4 @@ export async function lsTool(input: LsInput) {
     structuredContent: { directory: abs, entries, gitIgnoredCount, summary: `Listed ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}.` },
   };
 }
+

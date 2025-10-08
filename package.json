@@ -1,6 +1,6 @@
 {
   "name": "code-tools-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local-only MCP server exposing fast code navigation, reading, and editing tools over STDIO.",
   "type": "module",
   "main": "./dist/index.js",
@@ -39,8 +39,8 @@
     "llm",
     "agent"
   ],
-  "author": "",
-  "license": "ISC",
+  "author": "Aditya Sharma <aditya@adityasharma.net>",
+  "license": "MIT",
   "engines": {
     "node": ">=18"
   },

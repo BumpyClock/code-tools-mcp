@@ -17,6 +17,22 @@ export const ripgrepShape = {
 export const ripgrepInput = z.object(ripgrepShape);
 export type RipgrepInput = z.infer<typeof ripgrepInput>;
 
+// Output schema for structured content returned by this tool
+export const ripgrepOutputShape = {
+  matches: z.array(z.object({
+    filePath: z.string(),
+    lineNumber: z.number(),
+    line: z.string(),
+  })),
+  stderr: z.string().optional(),
+  summary: z.string(),
+  truncated: z.boolean(),
+  maxMatches: z.number().optional(),
+  aborted: z.boolean().optional(),
+  error: z.string().optional(),
+};
+
+
 function haveRgOnPath(): Promise<boolean> {
   return new Promise((resolve) => {
     const proc = spawn('rg', ['--version'], { stdio: ['ignore', 'ignore', 'ignore'] });
@@ -189,3 +205,4 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
     } 
   };
 }
+

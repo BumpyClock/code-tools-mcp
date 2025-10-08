@@ -16,6 +16,17 @@ export const editShape = {
 export const editInput = z.object(editShape);
 export type EditInput = z.infer<typeof editInput>;
 
+// Output schema for structured content returned by this tool
+export const editOutputShape = {
+  path: z.string().optional(),
+  applied: z.boolean(),
+  diff: z.string(),
+  occurrences: z.number(),
+  summary: z.string(),
+  error: z.string().optional(),
+};
+
+
 function countOccurrences(haystack: string, needle: string): number {
   if (needle === '') return 0;
   return haystack.split(needle).length - 1;
@@ -117,4 +128,5 @@ export async function editTool(input: EditInput) {
     } 
   };
 }
+
 

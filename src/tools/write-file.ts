@@ -16,6 +16,20 @@ export const writeFileShape = {
 export const writeFileInput = z.object(writeFileShape);
 export type WriteFileInput = z.infer<typeof writeFileInput>;
 
+// Output schema for structured content returned by this tool
+export const writeFileOutputShape = {
+  path: z.string().optional(),
+  applied: z.boolean(),
+  diff: z.string().optional(),
+  summary: z.string(),
+  linesAdded: z.number().optional(),
+  linesRemoved: z.number().optional(),
+  modifiedByUser: z.boolean().optional(),
+  error: z.string().optional(),
+  message: z.string().optional(),
+};
+
+
 async function readIfExists(abs: string): Promise<{ exists: boolean; content: string }> {
   try {
     const buf = await fs.readFile(abs, 'utf8');
@@ -138,4 +152,5 @@ export async function writeFileTool(input: WriteFileInput) {
     } 
   };
 }
+
 

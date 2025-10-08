@@ -18,6 +18,25 @@ export const readManyFilesShape = {
 export const readManyFilesInput = z.object(readManyFilesShape);
 export type ReadManyFilesInput = z.infer<typeof readManyFilesInput>;
 
+// Output schema for structured content returned by this tool
+export const readManyFilesOutputShape = {
+  files: z.array(z.string()),
+  skipped: z.array(z.object({ path: z.string(), reason: z.string() })),
+  skipCounts: z.object({
+    ignored: z.number().optional(),
+    binary: z.number().optional(),
+    tooLarge: z.number().optional(),
+    notFile: z.number().optional(),
+    totalCapReached: z.number().optional(),
+    readError: z.number().optional(),
+  }).optional(),
+  totalBytes: z.number(),
+  truncated: z.boolean().optional(),
+  totalCapReached: z.boolean().optional(),
+  summary: z.string(),
+};
+
+
 const DEFAULT_EXCLUDES = ['**/{node_modules,.git,dist,build,out}/**'];
 const SEP_FORMAT = '--- {filePath} ---';
 const TERMINATOR = '\n--- End of content ---';
@@ -132,3 +151,4 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
     }
   };
 }
+
