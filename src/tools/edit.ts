@@ -26,6 +26,15 @@ export async function editTool(input: EditInput) {
   if (!path.isAbsolute(file_path)) {
     return { content: [{ type: 'text' as const, text: `Path must be absolute: ${file_path}` }], structuredContent: { error: 'PATH_NOT_ABSOLUTE' } };
   }
+  
+  // Check for no-change edits early
+  if (old_string === new_string) {
+    return { 
+      content: [{ type: 'text' as const, text: `No changes to apply: old_string and new_string are identical.` }], 
+      structuredContent: { error: 'EDIT_NO_CHANGE', message: 'old_string and new_string are identical' } 
+    };
+  }
+  
   const abs = resolveWithinWorkspace(file_path);
   let current: string | null = null;
   let exists = false;
@@ -38,6 +47,14 @@ export async function editTool(input: EditInput) {
 
   if (!exists && old_string !== '') {
     return { content: [{ type: 'text' as const, text: `File not found. Cannot apply edit unless old_string is empty to create a new file.` }], structuredContent: { error: 'FILE_NOT_FOUND' } };
+  }
+  
+  // Better error for existing file with empty old_string
+  if (exists && old_string === '') {
+    return { 
+      content: [{ type: 'text' as const, text: `File already exists. Cannot use empty old_string on existing file. Use old_string to specify text to replace.` }], 
+      structuredContent: { error: 'EDIT_FILE_EXISTS', message: 'Cannot use empty old_string on existing file' } 
+    };
   }
 
   const isNewFile = !exists && old_string === '';
@@ -55,17 +72,49 @@ export async function editTool(input: EditInput) {
   }
 
   const newContent = isNewFile ? new_string : source.split(old_string).join(new_string);
+  
+  // Check if content actually changed
+  if (!isNewFile && newContent === source) {
+    return { 
+      content: [{ type: 'text' as const, text: `No changes resulted from the edit operation.` }], 
+      structuredContent: { error: 'EDIT_NO_CHANGE', message: 'Content unchanged after replacements' } 
+    };
+  }
+  
   const fileName = path.basename(abs);
   const diff = Diff.createPatch(fileName, source, newContent, 'Current', 'Proposed');
+  
+  // Add summary to structured content
+  const summary = isNewFile 
+    ? 'Creating new file' 
+    : `Replacing ${occ} occurrence${occ > 1 ? 's' : ''} in file`;
 
   if (!apply) {
     const preview = `Edit preview for ${abs} (not applied). To apply, call edit with apply: true.\n\n${diff}`;
-    return { content: [{ type: 'text' as const, text: preview }], structuredContent: { path: abs, applied: false, diff, occurrences: isNewFile ? 0 : occ } };
+    return { 
+      content: [{ type: 'text' as const, text: preview }], 
+      structuredContent: { 
+        path: abs, 
+        applied: false, 
+        diff, 
+        occurrences: isNewFile ? 0 : occ,
+        summary: `${summary} (preview)`
+      } 
+    };
   }
 
   await fs.mkdir(path.dirname(abs), { recursive: true });
   await fs.writeFile(abs, newContent, 'utf8');
   const result = `Applied edit to ${abs}.\n\n${diff}`;
-  return { content: [{ type: 'text' as const, text: result }], structuredContent: { path: abs, applied: true, diff, occurrences: isNewFile ? 0 : occ } };
+  return { 
+    content: [{ type: 'text' as const, text: result }], 
+    structuredContent: { 
+      path: abs, 
+      applied: true, 
+      diff, 
+      occurrences: isNewFile ? 0 : occ,
+      summary: `${summary} (applied)`
+    } 
+  };
 }
 

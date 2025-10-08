@@ -12,6 +12,7 @@ export const ripgrepShape = {
   include: z.union([z.string(), z.array(z.string())]).optional().describe('Glob include pattern(s), e.g. **/*.{ts,tsx}'),
   exclude: z.union([z.string(), z.array(z.string())]).optional().describe('Glob exclude pattern(s), e.g. **/dist/**'),
   ignore_case: z.boolean().optional().describe('Case-insensitive search (default true).'),
+  max_matches: z.number().optional().describe('Maximum number of matches to return (default 20000).'),
 };
 export const ripgrepInput = z.object(ripgrepShape);
 export type RipgrepInput = z.infer<typeof ripgrepInput>;
@@ -46,6 +47,7 @@ async function ensureLocalRg(): Promise<string | null> {
 export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
   const root = getWorkspaceRoot();
   const baseDir = input.path ? resolveWithinWorkspace(path.isAbsolute(input.path) ? input.path : path.join(root, input.path)) : root;
+  const maxMatches = input.max_matches ?? 20000;
 
   let rgCmd: string | null = null;
   if (await haveRgOnPath()) {
@@ -61,11 +63,26 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
     const excludeStr = Array.isArray(input.exclude)
       ? `{${input.exclude.join(',')}}`
       : input.exclude;
-    return grepTool({ pattern: input.pattern, path: path.relative(root, baseDir) || '.', include: includeStr, exclude: excludeStr, regex: true, ignore_case: input.ignore_case !== false } as z.infer<typeof grepInput>, signal);
+    return grepTool({ 
+      pattern: input.pattern, 
+      path: path.relative(root, baseDir) || '.', 
+      include: includeStr, 
+      exclude: excludeStr, 
+      regex: true, 
+      ignore_case: input.ignore_case,
+      max_matches: maxMatches 
+    } as z.infer<typeof grepInput>, signal);
   }
 
   const args = ['--json', '--line-number'];
-  if (input.ignore_case !== false) args.push('--ignore-case');
+  
+  // Smart-case: if ignore_case is undefined, use --smart-case
+  if (input.ignore_case === undefined) {
+    args.push('--smart-case');
+  } else if (input.ignore_case !== false) {
+    args.push('--ignore-case');
+  }
+  
   // include globs
   const includes = input.include ? (Array.isArray(input.include) ? input.include : [input.include]) : [];
   for (const inc of includes) args.push('-g', inc);
@@ -81,7 +98,7 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
   const matches: Array<{ filePath: string; lineNumber: number; line: string }> = [];
   let stderrBuf = '';
   let aborted = false;
-  const MAX = 20000;
+  let truncated = false;
 
   signal?.addEventListener('abort', () => {
     aborted = true;
@@ -101,7 +118,8 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
             const submatches = evt.data.submatches as Array<{ match: { text: string } }>;
             matches.push({ filePath, lineNumber: evt.data.line_number, line: evt.data.lines.text.trimEnd() });
             // We ignore submatch ranges for simplicity; line text is enough
-            if (matches.length >= MAX) {
+            if (matches.length >= maxMatches) {
+              truncated = true;
               proc.kill();
               break;
             }
@@ -122,10 +140,18 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 
   if (matches.length === 0) {
     const where = path.relative(root, baseDir) || '.';
-  const filterDesc = includes.length ? ` (filter: ${includes.join(', ')})` : '';
-  const excludeDesc = excludes.length ? ` (exclude: ${excludes.join(', ')})` : '';
-  const msg = `No matches for "${input.pattern}" in ${where}${filterDesc}${excludeDesc}.`;
-    return { content: [{ type: 'text' as const, text: msg }], structuredContent: { matches: [], stderr: stderrBuf || undefined, summary: 'No matches found.' } };
+    const filterDesc = includes.length ? ` (filter: ${includes.join(', ')})` : '';
+    const excludeDesc = excludes.length ? ` (exclude: ${excludes.join(', ')})` : '';
+    const msg = `No matches for "${input.pattern}" in ${where}${filterDesc}${excludeDesc}.`;
+    return { 
+      content: [{ type: 'text' as const, text: msg }], 
+      structuredContent: { 
+        matches: [], 
+        stderr: stderrBuf || undefined, 
+        summary: 'No matches found.',
+        truncated: false 
+      } 
+    };
   }
 
   const byFile = new Map<string, Array<{ lineNumber: number; line: string }>>();
@@ -135,14 +161,31 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
   }
   for (const arr of byFile.values()) arr.sort((a, b) => a.lineNumber - b.lineNumber);
 
-  let text = `Found ${matches.length} matches for pattern "${input.pattern}"${input.include ? ` (filter: "${input.include}")` : ''}:\n---\n`;
+  // Improved scope messaging
+  const searchScope = baseDir === root 
+    ? 'across workspace' 
+    : `in ${path.relative(root, baseDir)}`;
+  
+  let text = `Found ${matches.length} matches for pattern "${input.pattern}" ${searchScope}${input.include ? ` (filter: "${input.include}")` : ''}:\n---\n`;
   for (const [file, arr] of byFile) {
     text += `File: ${file}\n`;
     for (const r of arr) text += `L${r.lineNumber}: ${r.line}\n`;
     text += '---\n';
   }
-  if (matches.length >= MAX) text += `(limited to ${MAX} matches)\n`;
+  if (truncated) text += `(limited to ${maxMatches} matches)\n`;
 
-  const summary = `Found ${matches.length} match${matches.length === 1 ? '' : 'es'}.`;
-  return { content: [{ type: 'text' as const, text: text.trimEnd() }], structuredContent: { matches, stderr: stderrBuf || undefined, summary } };
+  const summary = truncated 
+    ? `Found ${matches.length} matches (limited to ${maxMatches}).`
+    : `Found ${matches.length} match${matches.length === 1 ? '' : 'es'}.`;
+    
+  return { 
+    content: [{ type: 'text' as const, text: text.trimEnd() }], 
+    structuredContent: { 
+      matches, 
+      stderr: stderrBuf || undefined, 
+      summary,
+      truncated,
+      maxMatches: truncated ? maxMatches : undefined
+    } 
+  };
 }
