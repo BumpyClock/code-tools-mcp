@@ -83,10 +83,12 @@ Add to your Claude config JSON:
 ## Tools
 
 ### list_directory
-Lists directory contents with directories first, respects `.gitignore`.
+Lists directory contents with directories first, respects `.gitignore` (recursive optional).
 
 **Parameters:**
 - `path` (string, required): Absolute path, or workspace-relative path to directory
+- `recursive` (boolean, optional): If true, list entries recursively (default: false)
+- `max_depth` (number, optional): Max recursion depth when `recursive: true` (default: 10)
 - `ignore` (string[], optional): Glob patterns to ignore
 - `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean }`
 
@@ -152,6 +154,11 @@ Text/regex search with smart-case support.
 - `exclude` (string | string[], optional): Glob exclusion patterns
 - `regex` (boolean, default: false): Treat pattern as regex
 - `ignore_case` (boolean, optional): Case-insensitive search. If undefined, uses smart-case (case-sensitive if pattern has uppercase)
+- `match_whole_word` (boolean, optional): Match whole words only (word boundaries)
+- `context_lines_before` (number, optional): Context lines before each match (-B)
+- `context_lines_after` (number, optional): Context lines after each match (-A)
+- `context_lines` (number, optional): Context lines before/after each match (-C)
+- `output_mode` (string, optional): `'full' | 'files_only' | 'count'` (default: `'full'`)
 - `max_matches` (number, default: 2000): Maximum matches to return
 - `useDefaultExcludes` (boolean, optional): Apply default excludes (node_modules, dist, .git, etc.). Default true.
 
@@ -160,6 +167,8 @@ Text/regex search with smart-case support.
 - Skips binary files
 - Respects `.gitignore`
 - Returns `truncated: true` if max_matches reached
+- Optional context lines to reduce follow-up `read_file` calls
+- `output_mode: 'files_only'` returns just matching file paths
 
 **Example:**
 ```typescript
@@ -180,6 +189,10 @@ Fast regex search using ripgrep binary (falls back to grep if unavailable).
 - `include` (string | string[], optional): Glob include patterns
 - `exclude` (string | string[], optional): Glob exclude patterns
 - `ignore_case` (boolean, optional): If undefined, uses `--smart-case`
+- `context_lines_before` (number, optional): Context lines before each match (-B)
+- `context_lines_after` (number, optional): Context lines after each match (-A)
+- `context_lines` (number, optional): Context lines before/after each match (-C)
+- `output_mode` (string, optional): `'full' | 'files_only' | 'count'` (default: `'full'`)
 - `max_matches` (number, default: 20000): Maximum matches to return
 
 **Features:**
@@ -205,10 +218,13 @@ Matches files by glob pattern with two-tier sorting.
 - `path` (string, optional): Directory to search (absolute or workspace-relative; defaults to workspace root)
 - `case_sensitive` (boolean, default: false): Case-sensitive matching
 - `respect_git_ignore` (boolean, default: true): Respect `.gitignore`
+- `include_hidden` (boolean, default: true): Include hidden files (dotfiles)
+- `max_files` (number, default: 1000): Maximum files to return
 
 **Features:**
 - Two-tier sorting: recent files (< 24h) newest-first, then older files alphabetically
 - Reports `gitIgnoredCount` when no files found
+- Returns `truncated: true` if `max_files` reached
 
 **Example:**
 ```typescript
@@ -233,6 +249,7 @@ Targeted text replacement with preview mode.
 - Preview mode by default
 - Detects no-change edits
 - Returns `occurrences` in structured content
+- Adds `affectedLines` + `totalLinesAffected` in structured content (preview and applied)
 
 **Example:**
 ```typescript
@@ -258,6 +275,30 @@ Reads multiple files by glob patterns, concatenated output.
 - 2MB total output cap
 - Workspace containment re-check for safety
 - Aggregated skip reasons in structured content (`skipCounts`)
+- Adds `fileStats` with per-file line/byte counts
+
+---
+## Error Codes
+
+All tools return `structuredContent.error` using standardized codes (when an error occurs). Most errors also include a human-readable `structuredContent.message`.
+
+- `NOT_FOUND`
+- `OUTSIDE_WORKSPACE`
+- `SENSITIVE_PATH`
+- `FILE_IGNORED`
+- `PATH_IS_NOT_A_DIRECTORY`
+- `FILE_TOO_LARGE`
+- `INVALID_REGEX`
+- `EDIT_NO_CHANGE`
+- `EDIT_FILE_EXISTS`
+- `EDIT_NO_OCCURRENCE_FOUND`
+- `EDIT_EXPECTED_OCCURRENCE_MISMATCH`
+- `OVERWRITE_DISABLED`
+- `PERMISSION_DENIED`
+- `DISK_FULL`
+- `IS_DIRECTORY`
+- `PARENT_NOT_DIRECTORY`
+- `WRITE_FAILED`
 - Returns `truncated: true` when total cap reached
 
 **Example:**

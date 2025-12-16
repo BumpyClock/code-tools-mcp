@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import * as Diff from "diff";
 import { z } from "zod";
+import { ErrorCode } from "../types/error-codes.js";
 import { buildIgnoreFilter } from "../utils/ignore.js";
 import {
 	isSensitivePath,
@@ -89,29 +90,32 @@ function getDiffStats(
 	return { added, removed };
 }
 
-function mapFileSystemError(error: unknown): { message: string; code: string } {
+function mapFileSystemError(error: unknown): {
+	message: string;
+	code: ErrorCode;
+} {
 	const err = error as NodeJS.ErrnoException | undefined;
 	if (err?.code === "EACCES") {
 		return {
 			message: "Permission denied: cannot write to file",
-			code: "PERMISSION_DENIED",
+			code: ErrorCode.PERMISSION_DENIED,
 		};
 	} else if (err?.code === "ENOSPC") {
-		return { message: "No space left on device", code: "DISK_FULL" };
+		return { message: "No space left on device", code: ErrorCode.DISK_FULL };
 	} else if (err?.code === "EISDIR") {
 		return {
 			message: "Cannot write to directory: path is a directory",
-			code: "IS_DIRECTORY",
+			code: ErrorCode.IS_DIRECTORY,
 		};
 	} else if (err?.code === "ENOTDIR") {
 		return {
 			message: "Parent path is not a directory",
-			code: "PARENT_NOT_DIRECTORY",
+			code: ErrorCode.PARENT_NOT_DIRECTORY,
 		};
 	}
 	return {
 		message: err?.message ?? "Write operation failed",
-		code: "WRITE_FAILED",
+		code: ErrorCode.WRITE_FAILED,
 	};
 }
 
@@ -134,7 +138,7 @@ export async function writeFileTool(input: WriteFileInput) {
 		return {
 			content: [{ type: "text" as const, text: msg }],
 			structuredContent: {
-				error: "OUTSIDE_WORKSPACE",
+				error: ErrorCode.OUTSIDE_WORKSPACE,
 				message: msg,
 			},
 		};
@@ -146,7 +150,7 @@ export async function writeFileTool(input: WriteFileInput) {
 		return {
 			content: [{ type: "text" as const, text: msg }],
 			structuredContent: {
-				error: "SENSITIVE_PATH",
+				error: ErrorCode.SENSITIVE_PATH,
 				message: msg,
 				path: abs,
 				relativePath: relPosix,
@@ -162,7 +166,7 @@ export async function writeFileTool(input: WriteFileInput) {
 			return {
 				content: [{ type: "text" as const, text: msg }],
 				structuredContent: {
-					error: "FILE_IGNORED",
+					error: ErrorCode.FILE_IGNORED,
 					message: msg,
 					path: abs,
 					relativePath: relPosix,
@@ -180,7 +184,7 @@ export async function writeFileTool(input: WriteFileInput) {
 					text: `File exists and overwrite=false: ${abs}`,
 				},
 			],
-			structuredContent: { error: "OVERWRITE_DISABLED" },
+			structuredContent: { error: ErrorCode.OVERWRITE_DISABLED },
 		};
 	}
 

@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import * as Diff from "diff";
 import { z } from "zod";
+import { ErrorCode } from "../types/error-codes.js";
 import { buildIgnoreFilter } from "../utils/ignore.js";
 import {
 	isSensitivePath,
@@ -52,6 +53,8 @@ export const editOutputShape = {
 	applied: z.boolean().optional(),
 	diff: z.string().optional(),
 	occurrences: z.number().optional(),
+	affectedLines: z.array(z.number()).optional(),
+	totalLinesAffected: z.number().optional(),
 	summary: z.string().optional(),
 	error: z.string().optional(),
 	message: z.string().optional(),
@@ -60,6 +63,54 @@ export const editOutputShape = {
 function countOccurrences(haystack: string, needle: string): number {
 	if (needle === "") return 0;
 	return haystack.split(needle).length - 1;
+}
+
+function lineStarts(text: string): number[] {
+	const starts = [0];
+	for (let i = 0; i < text.length; i++) {
+		if (text[i] === "\n") starts.push(i + 1);
+	}
+	return starts;
+}
+
+function lineNumberAtIndex(starts: number[], index: number): number {
+	let lo = 0;
+	let hi = starts.length - 1;
+	while (lo <= hi) {
+		const mid = Math.floor((lo + hi) / 2);
+		const v = starts[mid];
+		if (v === index) return mid + 1;
+		if (v < index) lo = mid + 1;
+		else hi = mid - 1;
+	}
+	return Math.max(1, hi + 1);
+}
+
+function computeAffectedLines(
+	source: string,
+	oldNeedle: string,
+	newContent: string,
+	isNewFile: boolean,
+): number[] {
+	if (isNewFile) {
+		const count = newContent.length === 0 ? 0 : newContent.split("\n").length;
+		return Array.from({ length: count }, (_v, i) => i + 1);
+	}
+	if (!oldNeedle) return [];
+
+	const starts = lineStarts(source);
+	const affected = new Set<number>();
+	let fromIndex = 0;
+	while (true) {
+		const idx = source.indexOf(oldNeedle, fromIndex);
+		if (idx === -1) break;
+		const startLine = lineNumberAtIndex(starts, idx);
+		const endIdx = Math.max(idx, idx + oldNeedle.length - 1);
+		const endLine = lineNumberAtIndex(starts, endIdx);
+		for (let l = startLine; l <= endLine; l++) affected.add(l);
+		fromIndex = idx + oldNeedle.length;
+	}
+	return Array.from(affected).sort((a, b) => a - b);
 }
 
 export async function editTool(input: EditInput) {
@@ -82,7 +133,7 @@ export async function editTool(input: EditInput) {
 				},
 			],
 			structuredContent: {
-				error: "EDIT_NO_CHANGE",
+				error: ErrorCode.EDIT_NO_CHANGE,
 				message: "old_string and new_string are identical",
 			},
 		};
@@ -95,7 +146,7 @@ export async function editTool(input: EditInput) {
 		const msg = e instanceof Error ? e.message : String(e);
 		return {
 			content: [{ type: "text" as const, text: msg }],
-			structuredContent: { error: "OUTSIDE_WORKSPACE", message: msg },
+			structuredContent: { error: ErrorCode.OUTSIDE_WORKSPACE, message: msg },
 		};
 	}
 
@@ -105,7 +156,7 @@ export async function editTool(input: EditInput) {
 		return {
 			content: [{ type: "text" as const, text: msg }],
 			structuredContent: {
-				error: "SENSITIVE_PATH",
+				error: ErrorCode.SENSITIVE_PATH,
 				message: msg,
 				path: abs,
 				relativePath: relPosix,
@@ -131,7 +182,7 @@ export async function editTool(input: EditInput) {
 			return {
 				content: [{ type: "text" as const, text: msg }],
 				structuredContent: {
-					error: "FILE_IGNORED",
+					error: ErrorCode.FILE_IGNORED,
 					message: msg,
 					path: abs,
 					relativePath: relPosix,
@@ -148,7 +199,7 @@ export async function editTool(input: EditInput) {
 					text: `File not found. Cannot apply edit unless old_string is empty to create a new file.`,
 				},
 			],
-			structuredContent: { error: "FILE_NOT_FOUND" },
+			structuredContent: { error: ErrorCode.NOT_FOUND },
 		};
 	}
 
@@ -162,7 +213,7 @@ export async function editTool(input: EditInput) {
 				},
 			],
 			structuredContent: {
-				error: "EDIT_FILE_EXISTS",
+				error: ErrorCode.EDIT_FILE_EXISTS,
 				message: "Cannot use empty old_string on existing file",
 			},
 		};
@@ -184,7 +235,7 @@ export async function editTool(input: EditInput) {
 						text: `Failed to edit: 0 occurrences found for old_string.`,
 					},
 				],
-				structuredContent: { error: "EDIT_NO_OCCURRENCE_FOUND" },
+				structuredContent: { error: ErrorCode.EDIT_NO_OCCURRENCE_FOUND },
 			};
 		}
 		if (occ !== expected) {
@@ -195,7 +246,9 @@ export async function editTool(input: EditInput) {
 						text: `Failed to edit: expected ${expected} occurrences but found ${occ}.`,
 					},
 				],
-				structuredContent: { error: "EDIT_EXPECTED_OCCURRENCE_MISMATCH" },
+				structuredContent: {
+					error: ErrorCode.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+				},
 			};
 		}
 	}
@@ -212,7 +265,7 @@ export async function editTool(input: EditInput) {
 				},
 			],
 			structuredContent: {
-				error: "EDIT_NO_CHANGE",
+				error: ErrorCode.EDIT_NO_CHANGE,
 				message: "Content unchanged after replacements",
 			},
 		};
@@ -233,6 +286,14 @@ export async function editTool(input: EditInput) {
 		? "Creating new file"
 		: `Replacing ${occ} occurrence${occ > 1 ? "s" : ""} in file`;
 
+	const affectedLines = computeAffectedLines(
+		source,
+		oldNorm,
+		newContent,
+		isNewFile,
+	);
+	const totalLinesAffected = affectedLines.length;
+
 	if (!apply) {
 		const preview = `Edit preview for ${rel} (not applied). To apply, call edit with apply: true.\n\n${diff}`;
 		return {
@@ -243,6 +304,8 @@ export async function editTool(input: EditInput) {
 				applied: false,
 				diff,
 				occurrences: isNewFile ? 0 : occ,
+				affectedLines,
+				totalLinesAffected,
 				summary: `${summary} (preview)`,
 			},
 		};
@@ -260,6 +323,8 @@ export async function editTool(input: EditInput) {
 			applied: true,
 			diff,
 			occurrences: isNewFile ? 0 : occ,
+			affectedLines,
+			totalLinesAffected,
 			summary: `${summary} (applied)`,
 		},
 	};

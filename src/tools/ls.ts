@@ -1,9 +1,10 @@
-// ABOUTME: Lists directory entries within the workspace (non-recursive).
+// ABOUTME: Lists directory entries within the workspace (optionally recursive).
 // ABOUTME: Applies ignore rules and basic safety blocks for sensitive paths.
 
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { ErrorCode } from "../types/error-codes.js";
 import {
 	buildIgnoreFilter,
 	type FilteringOptions,
@@ -23,6 +24,16 @@ export const lsShape = {
 		.describe(
 			"Absolute path within the workspace, or a path relative to workspace root.",
 		),
+	recursive: z
+		.boolean()
+		.optional()
+		.describe("List entries recursively (default false)."),
+	max_depth: z
+		.number()
+		.int()
+		.min(0)
+		.optional()
+		.describe("Max recursion depth when recursive=true."),
 	ignore: z
 		.array(z.string())
 		.optional()
@@ -73,7 +84,7 @@ export async function lsTool(input: LsInput) {
 				entries: [],
 				gitIgnoredCount: 0,
 				summary: "Directory not found",
-				error: "OUTSIDE_WORKSPACE",
+				error: ErrorCode.OUTSIDE_WORKSPACE,
 			},
 		};
 	}
@@ -89,7 +100,7 @@ export async function lsTool(input: LsInput) {
 				entries: [],
 				gitIgnoredCount: 0,
 				summary: "Refused sensitive path",
-				error: "SENSITIVE_PATH",
+				error: ErrorCode.SENSITIVE_PATH,
 			},
 		};
 	}
@@ -109,7 +120,7 @@ export async function lsTool(input: LsInput) {
 				entries: [],
 				gitIgnoredCount: 0,
 				summary: "Directory not found",
-				error: "FILE_NOT_FOUND",
+				error: ErrorCode.NOT_FOUND,
 			},
 		};
 	}
@@ -127,7 +138,7 @@ export async function lsTool(input: LsInput) {
 				entries: [],
 				gitIgnoredCount: 0,
 				summary: "Path is not a directory",
-				error: "PATH_IS_NOT_A_DIRECTORY",
+				error: ErrorCode.PATH_IS_NOT_A_DIRECTORY,
 			},
 		};
 	}
@@ -137,7 +148,6 @@ export async function lsTool(input: LsInput) {
 		respectGitIgnore: respectGit,
 	} satisfies FilteringOptions);
 
-	const names = await fs.readdir(abs);
 	let gitIgnoredCount = 0;
 	const entries = [] as Array<{
 		name: string;
@@ -148,52 +158,80 @@ export async function lsTool(input: LsInput) {
 		modifiedTime: string;
 	}>;
 
-	for (const name of names) {
-		const full = path.join(abs, name);
-		const relToRoot = path.relative(root, full);
+	const recursive = input.recursive ?? false;
+	const maxDepth = Math.max(1, input.max_depth ?? 10);
 
-		// ignore lib works with posixish paths; convert separators
-		const relPosix = toPosixPath(relToRoot);
-		if (isSensitivePath(relPosix)) continue;
-		if (ig.ignores(relPosix)) {
-			gitIgnoredCount += 1;
-			continue;
-		}
-		if (matchCustomIgnore(name, input.ignore)) continue;
+	const walk = async (dir: string, depth: number) => {
+		let names: string[];
 		try {
-			const s = await fs.stat(full);
-			entries.push({
-				name,
-				path: full,
-				relativePath: relPosix,
-				isDirectory: s.isDirectory(),
-				size: s.isDirectory() ? 0 : s.size,
-				modifiedTime: s.mtime.toISOString(),
-			});
-		} catch {}
-	}
+			names = await fs.readdir(dir);
+		} catch {
+			return;
+		}
 
-	entries.sort((a, b) =>
-		a.isDirectory === b.isDirectory
-			? a.name.localeCompare(b.name)
-			: a.isDirectory
-				? -1
-				: 1,
-	);
+		for (const name of names) {
+			const full = path.join(dir, name);
+			const relToRoot = path.relative(root, full);
+
+			// ignore lib works with posixish paths; convert separators
+			const relPosix = toPosixPath(relToRoot);
+			if (isSensitivePath(relPosix)) continue;
+			if (ig.ignores(relPosix)) {
+				gitIgnoredCount += 1;
+				continue;
+			}
+			if (matchCustomIgnore(name, input.ignore)) continue;
+
+			try {
+				const s = await fs.stat(full);
+				const isDirectory = s.isDirectory();
+				entries.push({
+					name,
+					path: full,
+					relativePath: relPosix,
+					isDirectory,
+					size: isDirectory ? 0 : s.size,
+					modifiedTime: s.mtime.toISOString(),
+				});
+				if (recursive && isDirectory && depth + 1 < maxDepth) {
+					await walk(full, depth + 1);
+				}
+			} catch {}
+		}
+	};
+
+	await walk(abs, 0);
+
+	if (recursive) {
+		entries.sort((a, b) =>
+			(a.relativePath ?? a.path).localeCompare(b.relativePath ?? b.path),
+		);
+	} else {
+		entries.sort((a, b) =>
+			a.isDirectory === b.isDirectory
+				? a.name.localeCompare(b.name)
+				: a.isDirectory
+					? -1
+					: 1,
+		);
+	}
 
 	let text: string;
 	if (entries.length === 0) {
 		// Empty directory - clearer message
-		text = `Directory listing for ${relativize(abs)}:\n(empty directory)`;
+		text = `Directory listing for ${relativize(abs)}${recursive ? ` (recursive, max_depth=${maxDepth})` : ""}:\n(empty directory)`;
 		const ignoredMsgs = [] as string[];
 		if (gitIgnoredCount > 0)
 			ignoredMsgs.push(`${gitIgnoredCount} ignored by rules`);
 		if (ignoredMsgs.length) text += `\n\n(${ignoredMsgs.join(", ")})`;
 	} else {
 		const listing = entries
-			.map((e) => `${e.isDirectory ? "[DIR] " : ""}${e.name}`)
+			.map((e) => {
+				const relToListed = toPosixPath(path.relative(abs, e.path));
+				return `${e.isDirectory ? "[DIR] " : ""}${recursive ? relToListed : e.name}`;
+			})
 			.join("\n");
-		text = `Directory listing for ${relativize(abs)}:\n${listing}`;
+		text = `Directory listing for ${relativize(abs)}${recursive ? ` (recursive, max_depth=${maxDepth})` : ""}:\n${listing}`;
 		const ignoredMsgs = [] as string[];
 		if (gitIgnoredCount > 0)
 			ignoredMsgs.push(`${gitIgnoredCount} ignored by rules`);

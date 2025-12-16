@@ -6,6 +6,7 @@ import path from "node:path";
 import { isText } from "istextorbinary";
 import mime from "mime-types";
 import { z } from "zod";
+import { ErrorCode } from "../types/error-codes.js";
 import { buildIgnoreFilter } from "../utils/ignore.js";
 import {
 	isSensitivePath,
@@ -77,7 +78,7 @@ export async function readFileTool({
 		return {
 			content: [{ type: "text" as const, text: msg }],
 			structuredContent: {
-				error: "OUTSIDE_WORKSPACE",
+				error: ErrorCode.OUTSIDE_WORKSPACE,
 				message: msg,
 				summary: "Refused path outside workspace.",
 			},
@@ -90,7 +91,7 @@ export async function readFileTool({
 		return {
 			content: [{ type: "text" as const, text: msg }],
 			structuredContent: {
-				error: "SENSITIVE_PATH",
+				error: ErrorCode.SENSITIVE_PATH,
 				message: msg,
 				path: abs,
 				relativePath: relPosix,
@@ -107,7 +108,7 @@ export async function readFileTool({
 			return {
 				content: [{ type: "text" as const, text: msg }],
 				structuredContent: {
-					error: "FILE_IGNORED",
+					error: ErrorCode.FILE_IGNORED,
 					message: msg,
 					path: abs,
 					relativePath: relPosix,
@@ -122,7 +123,7 @@ export async function readFileTool({
 		return {
 			content: [{ type: "text" as const, text: msg }],
 			structuredContent: {
-				error: "FILE_NOT_FOUND",
+				error: ErrorCode.NOT_FOUND,
 				message: msg,
 				path: abs,
 				relativePath: relPosix,
@@ -140,7 +141,7 @@ export async function readFileTool({
 				},
 			],
 			structuredContent: {
-				error: "FILE_TOO_LARGE",
+				error: ErrorCode.FILE_TOO_LARGE,
 				message: msg,
 				path: abs,
 				relativePath: relPosix,

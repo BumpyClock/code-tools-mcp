@@ -40,6 +40,9 @@ export type ReadManyFilesInput = z.infer<typeof readManyFilesInput>;
 export const readManyFilesOutputShape = {
 	files: z.array(z.string()),
 	relativeFiles: z.array(z.string()).optional(),
+	fileStats: z
+		.array(z.object({ path: z.string(), lines: z.number(), bytes: z.number() }))
+		.optional(),
 	skipped: z.array(z.object({ path: z.string(), reason: z.string() })),
 	skipCounts: z
 		.object({
@@ -104,6 +107,7 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 			structuredContent: {
 				files: [],
 				relativeFiles: [],
+				fileStats: [],
 				skipped: [],
 				skipCounts: {
 					ignored: 0,
@@ -127,6 +131,7 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 	let output = "";
 	const included: string[] = [];
 	const includedRel: string[] = [];
+	const fileStats: Array<{ path: string; lines: number; bytes: number }> = [];
 	const skipped: Array<{ path: string; reason: string }> = [];
 
 	// Track skip reasons for aggregation
@@ -186,6 +191,11 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 			totalBytes = projected;
 			included.push(abs);
 			includedRel.push(relPosix);
+			fileStats.push({
+				path: abs,
+				lines: text.length === 0 ? 0 : text.split(/\r?\n/).length,
+				bytes: buf.byteLength,
+			});
 		} catch (_e) {
 			skipped.push({ path: abs, reason: "read error" });
 			skipCounts.readError++;
@@ -219,6 +229,7 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 		structuredContent: {
 			files: included,
 			relativeFiles: includedRel,
+			fileStats,
 			skipped,
 			skipCounts,
 			totalBytes,

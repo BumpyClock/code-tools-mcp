@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import fg from "fast-glob";
 import { z } from "zod";
+import { ErrorCode } from "../types/error-codes.js";
 import { buildIgnoreFilter } from "../utils/ignore.js";
 import {
 	getWorkspaceRoot,
@@ -29,6 +30,16 @@ export const globShape = {
 		.boolean()
 		.optional()
 		.describe("Respect .gitignore (default true)."),
+	include_hidden: z
+		.boolean()
+		.optional()
+		.describe("Include hidden files (dotfiles). Default true."),
+	max_files: z
+		.number()
+		.int()
+		.min(1)
+		.optional()
+		.describe("Maximum number of files to return (default 1000)."),
 };
 export const globInput = z.object(globShape);
 export type GlobInput = z.infer<typeof globInput>;
@@ -38,6 +49,8 @@ export const globOutputShape = {
 	files: z.array(z.string()),
 	relativeFiles: z.array(z.string()).optional(),
 	summary: z.string(),
+	truncated: z.boolean().optional(),
+	maxFiles: z.number().optional(),
 	gitIgnoredCount: z.number().optional(),
 	error: z.string().optional(),
 	message: z.string().optional(),
@@ -59,7 +72,7 @@ export async function globTool(input: GlobInput) {
 					files: [],
 					relativeFiles: [],
 					summary: "Invalid path.",
-					error: "OUTSIDE_WORKSPACE",
+					error: ErrorCode.OUTSIDE_WORKSPACE,
 					message: msg,
 				},
 			};
@@ -75,7 +88,7 @@ export async function globTool(input: GlobInput) {
 				files: [],
 				relativeFiles: [],
 				summary: "Refused sensitive path.",
-				error: "SENSITIVE_PATH",
+				error: ErrorCode.SENSITIVE_PATH,
 				message: msg,
 			},
 		};
@@ -90,7 +103,7 @@ export async function globTool(input: GlobInput) {
 				files: [],
 				relativeFiles: [],
 				summary: "Path not found.",
-				error: "PATH_NOT_FOUND",
+				error: ErrorCode.NOT_FOUND,
 				message: msg,
 			},
 		};
@@ -103,7 +116,7 @@ export async function globTool(input: GlobInput) {
 				files: [],
 				relativeFiles: [],
 				summary: "Path is not a directory.",
-				error: "PATH_IS_NOT_A_DIRECTORY",
+				error: ErrorCode.PATH_IS_NOT_A_DIRECTORY,
 				message: msg,
 			},
 		};
@@ -116,7 +129,7 @@ export async function globTool(input: GlobInput) {
 	// Use objectMode for better performance - no extra fs.stat calls
 	const entries = await fg(input.pattern, {
 		cwd: baseDir,
-		dot: true,
+		dot: input.include_hidden ?? true,
 		caseSensitiveMatch: input.case_sensitive ?? false,
 		onlyFiles: true,
 		absolute: true,
@@ -182,8 +195,12 @@ export async function globTool(input: GlobInput) {
 	// Combine: recent files first, then older files
 	const sorted = [...recent, ...older];
 
-	const files = sorted.map((f) => f.full);
-	const relativeFiles = sorted.map((f) =>
+	const maxFiles = input.max_files ?? 1000;
+	const truncated = sorted.length > maxFiles;
+	const limited = truncated ? sorted.slice(0, maxFiles) : sorted;
+
+	const files = limited.map((f) => f.full);
+	const relativeFiles = limited.map((f) =>
 		toPosixPath(path.relative(root, f.full)),
 	);
 	const text = files.join("\n");
@@ -192,7 +209,11 @@ export async function globTool(input: GlobInput) {
 		structuredContent: {
 			files,
 			relativeFiles,
-			summary: `Found ${files.length} matching file(s).`,
+			summary: truncated
+				? `Found ${files.length} matching file(s) (limited to ${maxFiles}).`
+				: `Found ${files.length} matching file(s).`,
+			truncated: truncated || undefined,
+			maxFiles: truncated ? maxFiles : undefined,
 		},
 	};
 }

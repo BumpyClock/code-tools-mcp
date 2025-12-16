@@ -6,6 +6,7 @@ import path from "node:path";
 import fg from "fast-glob";
 import { isText } from "istextorbinary";
 import { z } from "zod";
+import { ErrorCode } from "../types/error-codes.js";
 import { buildIgnoreFilter } from "../utils/ignore.js";
 import {
 	getWorkspaceRoot,
@@ -39,6 +40,32 @@ export const grepShape = {
 		.boolean()
 		.optional()
 		.describe("Case-insensitive search (default true)."),
+	match_whole_word: z
+		.boolean()
+		.optional()
+		.describe("Match whole words only (word boundaries)."),
+	context_lines_before: z
+		.number()
+		.int()
+		.min(0)
+		.optional()
+		.describe("Number of context lines before each match (-B)."),
+	context_lines_after: z
+		.number()
+		.int()
+		.min(0)
+		.optional()
+		.describe("Number of context lines after each match (-A)."),
+	context_lines: z
+		.number()
+		.int()
+		.min(0)
+		.optional()
+		.describe("Number of context lines before/after each match (-C)."),
+	output_mode: z
+		.enum(["full", "files_only", "count"])
+		.optional()
+		.describe("Output mode: full match objects, files only, or count."),
 	max_matches: z
 		.number()
 		.optional()
@@ -62,15 +89,37 @@ export const grepOutputShape = {
 				absoluteFilePath: z.string().optional(),
 				lineNumber: z.number(),
 				line: z.string(),
+				contextBefore: z
+					.array(z.object({ lineNumber: z.number(), line: z.string() }))
+					.optional(),
+				contextAfter: z
+					.array(z.object({ lineNumber: z.number(), line: z.string() }))
+					.optional(),
 			}),
 		)
 		.optional(),
+	files: z.array(z.string()).optional(),
+	count: z.number().optional(),
 	summary: z.string().optional(),
 	truncated: z.boolean().optional(),
 	maxMatches: z.number().optional(),
 	error: z.string().optional(),
 	message: z.string().optional(),
 };
+
+function escapeRegExp(pattern: string): string {
+	return pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function resolveContextCounts(input: GrepInput): {
+	before: number;
+	after: number;
+} {
+	const c = input.context_lines ?? 0;
+	const before = input.context_lines_before ?? c;
+	const after = input.context_lines_after ?? c;
+	return { before, after };
+}
 
 export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 	const root = getWorkspaceRoot();
@@ -84,7 +133,7 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 			const msg = e instanceof Error ? e.message : String(e);
 			return {
 				content: [{ type: "text" as const, text: msg }],
-				structuredContent: { error: "OUTSIDE_WORKSPACE", message: msg },
+				structuredContent: { error: ErrorCode.OUTSIDE_WORKSPACE, message: msg },
 			};
 		}
 		const st = await fs.stat(resolved).catch(() => null);
@@ -97,7 +146,7 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 			const msg = `Path not found: ${resolved}`;
 			return {
 				content: [{ type: "text" as const, text: msg }],
-				structuredContent: { error: "PATH_NOT_FOUND", message: msg },
+				structuredContent: { error: ErrorCode.NOT_FOUND, message: msg },
 			};
 		}
 	}
@@ -132,9 +181,17 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 		absoluteFilePath?: string;
 		lineNumber: number;
 		line: string;
+		contextBefore?: Array<{ lineNumber: number; line: string }>;
+		contextAfter?: Array<{ lineNumber: number; line: string }>;
 	}> = [];
 
 	const maxMatches = input.max_matches ?? 2000;
+	const outputMode = input.output_mode ?? "full";
+	const { before: ctxBefore, after: ctxAfter } = resolveContextCounts(input);
+	const includeContext =
+		outputMode === "full" && (ctxBefore > 0 || ctxAfter > 0);
+	const matchedFiles = new Set<string>();
+	let matchCount = 0;
 	let truncated = false;
 
 	// Smart-case: if ignore_case is undefined and pattern has uppercase letters, make it case-sensitive
@@ -147,14 +204,16 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 	}
 
 	let rx: RegExp | null = null;
-	if (input.regex) {
+	if (input.regex || input.match_whole_word) {
 		try {
-			rx = new RegExp(input.pattern, ignoreCase ? "i" : undefined);
+			const base = input.regex ? input.pattern : escapeRegExp(input.pattern);
+			const wrapped = input.match_whole_word ? `\\b(?:${base})\\b` : base;
+			rx = new RegExp(wrapped, ignoreCase ? "i" : undefined);
 		} catch (e: unknown) {
 			const msg = `Invalid regular expression: ${e instanceof Error ? e.message : String(e)}`;
 			return {
 				content: [{ type: "text" as const, text: msg }],
-				structuredContent: { error: "INVALID_REGEX", message: msg },
+				structuredContent: { error: ErrorCode.INVALID_REGEX, message: msg },
 			};
 		}
 	}
@@ -178,26 +237,68 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 			const text = buf.toString("utf8");
 			const lines = text.split(/\r?\n/);
 
+			const pushMatch = (lineIndex: number) => {
+				if (stop || signal?.aborted) return;
+				if (matchCount >= maxMatches) {
+					truncated = true;
+					stop = true;
+					return;
+				}
+
+				matchCount += 1;
+				matchedFiles.add(relToRoot);
+
+				if (outputMode === "full") {
+					const match = {
+						filePath: relToRoot,
+						absoluteFilePath: file,
+						lineNumber: lineIndex + 1,
+						line: lines[lineIndex],
+					} as (typeof matches)[number];
+
+					if (includeContext) {
+						if (ctxBefore > 0) {
+							const start = Math.max(0, lineIndex - ctxBefore);
+							if (start < lineIndex) {
+								match.contextBefore = lines
+									.slice(start, lineIndex)
+									.map((line, offset) => ({
+										lineNumber: start + offset + 1,
+										line,
+									}));
+							}
+						}
+						if (ctxAfter > 0) {
+							const endExclusive = Math.min(
+								lines.length,
+								lineIndex + 1 + ctxAfter,
+							);
+							if (lineIndex + 1 < endExclusive) {
+								match.contextAfter = lines
+									.slice(lineIndex + 1, endExclusive)
+									.map((line, offset) => ({
+										lineNumber: lineIndex + 2 + offset,
+										line,
+									}));
+							}
+						}
+					}
+
+					matches.push(match);
+				}
+
+				if (matchCount >= maxMatches) {
+					truncated = true;
+					stop = true;
+				}
+			};
+
 			if (rx) {
 				for (let i = 0; i < lines.length; i++) {
 					if (stop || signal?.aborted) return;
 					if (!rx.test(lines[i])) continue;
-					if (matches.length >= maxMatches) {
-						truncated = true;
-						stop = true;
-						return;
-					}
-					matches.push({
-						filePath: relToRoot,
-						absoluteFilePath: file,
-						lineNumber: i + 1,
-						line: lines[i],
-					});
-					if (matches.length >= maxMatches) {
-						truncated = true;
-						stop = true;
-						return;
-					}
+					pushMatch(i);
+					if (stop) return;
 				}
 				return;
 			}
@@ -207,22 +308,8 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 				if (stop || signal?.aborted) return;
 				const hay = ignoreCase ? lines[i].toLowerCase() : lines[i];
 				if (!hay.includes(needle)) continue;
-				if (matches.length >= maxMatches) {
-					truncated = true;
-					stop = true;
-					return;
-				}
-				matches.push({
-					filePath: relToRoot,
-					absoluteFilePath: file,
-					lineNumber: i + 1,
-					line: lines[i],
-				});
-				if (matches.length >= maxMatches) {
-					truncated = true;
-					stop = true;
-					return;
-				}
+				pushMatch(i);
+				if (stop) return;
 			}
 		} catch {}
 	};
@@ -238,7 +325,7 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 
 	await Promise.all(workers);
 
-	if (matches.length === 0) {
+	if (matchCount === 0) {
 		const where = path.relative(root, baseDir) || ".";
 		const filter = input.include ? ` (filter: "${input.include}")` : "";
 		return {
@@ -249,25 +336,54 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 				},
 			],
 			structuredContent: {
-				matches: [],
+				matches: outputMode === "full" ? [] : undefined,
+				files: outputMode === "files_only" ? [] : undefined,
+				count: outputMode !== "full" ? 0 : undefined,
 				summary: "No matches found.",
 				truncated: false,
 			},
 		};
 	}
 
+	if (outputMode === "count") {
+		const summary = truncated
+			? `Found ${matchCount} matches (limited to ${maxMatches}).`
+			: `Found ${matchCount} match${matchCount === 1 ? "" : "es"}.`;
+		return {
+			content: [{ type: "text" as const, text: summary }],
+			structuredContent: {
+				count: matchCount,
+				summary,
+				truncated,
+				maxMatches: truncated ? maxMatches : undefined,
+			},
+		};
+	}
+
+	if (outputMode === "files_only") {
+		const files = Array.from(matchedFiles).sort((a, b) => a.localeCompare(b));
+		const summary = truncated
+			? `Found ${files.length} file(s) with matches (limited to ${maxMatches} matches).`
+			: `Found ${files.length} file(s) with matches.`;
+		return {
+			content: [{ type: "text" as const, text: files.join("\n") }],
+			structuredContent: {
+				files,
+				count: matchCount,
+				summary,
+				truncated,
+				maxMatches: truncated ? maxMatches : undefined,
+			},
+		};
+	}
+
 	// Group matches by file for better readability
-	const matchesByFile = new Map<
-		string,
-		Array<{ lineNumber: number; line: string }>
-	>();
+	const matchesByFile = new Map<string, Array<(typeof matches)[number]>>();
 	for (const match of matches) {
 		if (!matchesByFile.has(match.filePath)) {
 			matchesByFile.set(match.filePath, []);
 		}
-		matchesByFile
-			.get(match.filePath)
-			?.push({ lineNumber: match.lineNumber, line: match.line });
+		matchesByFile.get(match.filePath)?.push(match);
 	}
 	for (const arr of matchesByFile.values())
 		arr.sort((a, b) => a.lineNumber - b.lineNumber);
@@ -281,19 +397,28 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 		const fileMatches = matchesByFile.get(filePath) ?? [];
 		textParts.push(`${filePath}:`);
 		for (const match of fileMatches) {
+			if (match.contextBefore?.length) {
+				for (const c of match.contextBefore)
+					textParts.push(`  ${c.lineNumber}: ${c.line}`);
+			}
 			textParts.push(`  ${match.lineNumber}: ${match.line}`);
+			if (match.contextAfter?.length) {
+				for (const c of match.contextAfter)
+					textParts.push(`  ${c.lineNumber}: ${c.line}`);
+			}
 		}
 	}
 	const textOut = textParts.join("\n");
 
 	const summary = truncated
-		? `Found ${matches.length} matches (limited to ${maxMatches}).`
-		: `Found ${matches.length} match${matches.length === 1 ? "" : "es"}.`;
+		? `Found ${matchCount} matches (limited to ${maxMatches}).`
+		: `Found ${matchCount} match${matchCount === 1 ? "" : "es"}.`;
 
 	return {
 		content: [{ type: "text" as const, text: textOut }],
 		structuredContent: {
 			matches,
+			count: matchCount,
 			summary,
 			truncated,
 			maxMatches: truncated ? maxMatches : undefined,

@@ -3,6 +3,8 @@
 
 import type { z } from "zod";
 
+export { ErrorCode } from "./error-codes.js";
+
 /**
  * Unified TypeScript types for code-tools-mcp
  *

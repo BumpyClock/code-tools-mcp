@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { downloadRipGrep } from "@joshua.litt/get-ripgrep";
 import { z } from "zod";
+import { ErrorCode } from "../types/error-codes.js";
 import { ensureDir, fileExists, getGlobalBinDir } from "../utils/storage.js";
 import {
 	getWorkspaceRoot,
@@ -33,6 +34,28 @@ export const ripgrepShape = {
 		.boolean()
 		.optional()
 		.describe("Case-insensitive search (default true)."),
+	context_lines_before: z
+		.number()
+		.int()
+		.min(0)
+		.optional()
+		.describe("Number of context lines before each match (-B)."),
+	context_lines_after: z
+		.number()
+		.int()
+		.min(0)
+		.optional()
+		.describe("Number of context lines after each match (-A)."),
+	context_lines: z
+		.number()
+		.int()
+		.min(0)
+		.optional()
+		.describe("Number of context lines before/after each match (-C)."),
+	output_mode: z
+		.enum(["full", "files_only", "count"])
+		.optional()
+		.describe("Output mode: full match objects, files only, or count."),
 	max_matches: z
 		.number()
 		.optional()
@@ -50,9 +73,17 @@ export const ripgrepOutputShape = {
 				absoluteFilePath: z.string().optional(),
 				lineNumber: z.number(),
 				line: z.string(),
+				contextBefore: z
+					.array(z.object({ lineNumber: z.number(), line: z.string() }))
+					.optional(),
+				contextAfter: z
+					.array(z.object({ lineNumber: z.number(), line: z.string() }))
+					.optional(),
 			}),
 		)
 		.optional(),
+	files: z.array(z.string()).optional(),
+	count: z.number().optional(),
 	stderr: z.string().optional(),
 	summary: z.string().optional(),
 	truncated: z.boolean().optional(),
@@ -100,6 +131,16 @@ async function ensureLocalRg(): Promise<string | null> {
 	return (await fileExists(rgPath)) ? rgPath : null;
 }
 
+function resolveContextCounts(input: RipgrepInput): {
+	before: number;
+	after: number;
+} {
+	const c = input.context_lines ?? 0;
+	const before = input.context_lines_before ?? c;
+	const after = input.context_lines_after ?? c;
+	return { before, after };
+}
+
 export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 	const root = getWorkspaceRoot();
 	let baseDir = root;
@@ -114,7 +155,7 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 			const msg = e instanceof Error ? e.message : String(e);
 			return {
 				content: [{ type: "text" as const, text: msg }],
-				structuredContent: { error: "OUTSIDE_WORKSPACE", message: msg },
+				structuredContent: { error: ErrorCode.OUTSIDE_WORKSPACE, message: msg },
 			};
 		}
 
@@ -125,7 +166,7 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 				const msg = `Refusing to search sensitive file: ${relFilePosix}`;
 				return {
 					content: [{ type: "text" as const, text: msg }],
-					structuredContent: { error: "SENSITIVE_PATH", message: msg },
+					structuredContent: { error: ErrorCode.SENSITIVE_PATH, message: msg },
 				};
 			}
 			fileOnly = resolved;
@@ -136,7 +177,7 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 			const msg = `Path not found: ${resolved}`;
 			return {
 				content: [{ type: "text" as const, text: msg }],
-				structuredContent: { error: "PATH_NOT_FOUND", message: msg },
+				structuredContent: { error: ErrorCode.NOT_FOUND, message: msg },
 			};
 		}
 	}
@@ -146,11 +187,15 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 		const msg = `Refusing to search in sensitive path: ${baseDirRelPosix}`;
 		return {
 			content: [{ type: "text" as const, text: msg }],
-			structuredContent: { error: "SENSITIVE_PATH", message: msg },
+			structuredContent: { error: ErrorCode.SENSITIVE_PATH, message: msg },
 		};
 	}
 
 	const maxMatches = input.max_matches ?? 20000;
+	const outputMode = input.output_mode ?? "full";
+	const { before: ctxBefore, after: ctxAfter } = resolveContextCounts(input);
+	const includeContext =
+		outputMode === "full" && (ctxBefore > 0 || ctxAfter > 0);
 
 	let rgCmd: string | null = null;
 	if (await haveRgOnPath()) {
@@ -176,6 +221,10 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 				exclude: excludeStr,
 				regex: true,
 				ignore_case: input.ignore_case,
+				context_lines_before: input.context_lines_before,
+				context_lines_after: input.context_lines_after,
+				context_lines: input.context_lines,
+				output_mode: outputMode,
 				max_matches: maxMatches,
 			} as z.infer<typeof grepInput>,
 			signal,
@@ -224,7 +273,11 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 		absoluteFilePath?: string;
 		lineNumber: number;
 		line: string;
+		contextBefore?: Array<{ lineNumber: number; line: string }>;
+		contextAfter?: Array<{ lineNumber: number; line: string }>;
 	}> = [];
+	const matchedFiles = new Set<string>();
+	let matchCount = 0;
 	let stderrBuf = "";
 	let aborted = false;
 	let truncated = false;
@@ -237,6 +290,9 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 	let pending = "";
 	const handleJsonLine = (line: string) => {
 		if (!line.trim()) return;
+		// Enforce a hard total match cap; ripgrep's streaming output can emit more
+		// JSON events after the process is killed.
+		if (truncated || matchCount >= maxMatches) return;
 		try {
 			const evt = JSON.parse(line);
 			if (evt.type !== "match") return;
@@ -244,13 +300,17 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 			const relPosix = toPosixPath(path.relative(root, absFile));
 			if (isSensitivePath(relPosix)) return;
 
-			matches.push({
-				filePath: relPosix,
-				absoluteFilePath: absFile,
-				lineNumber: evt.data.line_number,
-				line: evt.data.lines.text.trimEnd(),
-			});
-			if (matches.length >= maxMatches) {
+			matchCount += 1;
+			matchedFiles.add(relPosix);
+			if (outputMode === "full") {
+				matches.push({
+					filePath: relPosix,
+					absoluteFilePath: absFile,
+					lineNumber: evt.data.line_number,
+					line: evt.data.lines.text.trimEnd(),
+				});
+			}
+			if (matchCount >= maxMatches) {
 				truncated = true;
 				proc.kill();
 			}
@@ -284,7 +344,7 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 		};
 	}
 
-	if (matches.length === 0) {
+	if (matchCount === 0) {
 		const where = path.relative(root, baseDir) || ".";
 		const filterDesc = includes.length
 			? ` (filter: ${includes.join(", ")})`
@@ -296,21 +356,15 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 		return {
 			content: [{ type: "text" as const, text: msg }],
 			structuredContent: {
-				matches: [],
+				matches: outputMode === "full" ? [] : undefined,
+				files: outputMode === "files_only" ? [] : undefined,
+				count: outputMode !== "full" ? 0 : undefined,
 				stderr: stderrBuf || undefined,
 				summary: "No matches found.",
 				truncated: false,
 			},
 		};
 	}
-
-	const byFile = new Map<string, Array<{ lineNumber: number; line: string }>>();
-	for (const m of matches) {
-		if (!byFile.has(m.filePath)) byFile.set(m.filePath, []);
-		byFile.get(m.filePath)?.push({ lineNumber: m.lineNumber, line: m.line });
-	}
-	for (const arr of byFile.values())
-		arr.sort((a, b) => a.lineNumber - b.lineNumber);
 
 	// Improved scope messaging
 	const searchScope = fileOnly
@@ -319,10 +373,111 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 			? "across workspace"
 			: `in ${toPosixPath(path.relative(root, baseDir))}`;
 
+	if (outputMode === "count") {
+		const summary = truncated
+			? `Found ${matchCount} matches (limited to ${maxMatches}).`
+			: `Found ${matchCount} match${matchCount === 1 ? "" : "es"}.`;
+		return {
+			content: [{ type: "text" as const, text: summary }],
+			structuredContent: {
+				count: matchCount,
+				stderr: stderrBuf || undefined,
+				summary,
+				truncated,
+				maxMatches: truncated ? maxMatches : undefined,
+			},
+		};
+	}
+
+	if (outputMode === "files_only") {
+		const files = Array.from(matchedFiles).sort((a, b) => a.localeCompare(b));
+		const summary = truncated
+			? `Found ${files.length} file(s) with matches (limited to ${maxMatches} matches).`
+			: `Found ${files.length} file(s) with matches.`;
+		return {
+			content: [{ type: "text" as const, text: files.join("\n") }],
+			structuredContent: {
+				files,
+				count: matchCount,
+				stderr: stderrBuf || undefined,
+				summary,
+				truncated,
+				maxMatches: truncated ? maxMatches : undefined,
+			},
+		};
+	}
+
+	if (includeContext) {
+		const CONTEXT_FILE_BYTE_CAP = 2 * 1024 * 1024;
+		const matchesByAbs = new Map<string, Array<(typeof matches)[number]>>();
+		for (const m of matches) {
+			const abs = m.absoluteFilePath;
+			if (!abs) continue;
+			if (!matchesByAbs.has(abs)) matchesByAbs.set(abs, []);
+			matchesByAbs.get(abs)?.push(m);
+		}
+
+		for (const [abs, fileMatches] of matchesByAbs) {
+			try {
+				const st = await fs.stat(abs);
+				if (!st.isFile()) continue;
+				if (st.size > CONTEXT_FILE_BYTE_CAP) continue;
+				const text = await fs.readFile(abs, "utf8");
+				const lines = text.split(/\r?\n/);
+				for (const m of fileMatches) {
+					const lineIndex = m.lineNumber - 1;
+					if (lineIndex < 0 || lineIndex >= lines.length) continue;
+					if (ctxBefore > 0) {
+						const start = Math.max(0, lineIndex - ctxBefore);
+						if (start < lineIndex) {
+							m.contextBefore = lines
+								.slice(start, lineIndex)
+								.map((line, offset) => ({
+									lineNumber: start + offset + 1,
+									line,
+								}));
+						}
+					}
+					if (ctxAfter > 0) {
+						const endExclusive = Math.min(
+							lines.length,
+							lineIndex + 1 + ctxAfter,
+						);
+						if (lineIndex + 1 < endExclusive) {
+							m.contextAfter = lines
+								.slice(lineIndex + 1, endExclusive)
+								.map((line, offset) => ({
+									lineNumber: lineIndex + 2 + offset,
+									line,
+								}));
+						}
+					}
+				}
+			} catch {}
+		}
+	}
+
+	const byFile = new Map<string, Array<(typeof matches)[number]>>();
+	for (const m of matches) {
+		if (!byFile.has(m.filePath)) byFile.set(m.filePath, []);
+		byFile.get(m.filePath)?.push(m);
+	}
+	for (const arr of byFile.values())
+		arr.sort((a, b) => a.lineNumber - b.lineNumber);
+
 	let text = `Found ${matches.length} matches for pattern "${input.pattern}" ${searchScope}${input.include ? ` (filter: "${input.include}")` : ""}:\n---\n`;
 	for (const [file, arr] of byFile) {
 		text += `File: ${file}\n`;
-		for (const r of arr) text += `L${r.lineNumber}: ${r.line}\n`;
+		for (const r of arr) {
+			if (r.contextBefore?.length) {
+				for (const c of r.contextBefore)
+					text += `L${c.lineNumber}: ${c.line}\n`;
+			}
+			text += `L${r.lineNumber}: ${r.line}\n`;
+			if (r.contextAfter?.length) {
+				for (const c of r.contextAfter) text += `L${c.lineNumber}: ${c.line}\n`;
+			}
+		}
 		text += "---\n";
 	}
 	if (truncated) text += `(limited to ${maxMatches} matches)\n`;
@@ -335,6 +490,7 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 		content: [{ type: "text" as const, text: text.trimEnd() }],
 		structuredContent: {
 			matches,
+			count: matchCount,
 			stderr: stderrBuf || undefined,
 			summary,
 			truncated,
