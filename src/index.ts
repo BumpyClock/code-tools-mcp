@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+// ABOUTME: Hosts the MCP stdio server and registers workspace-safe code tools.
+// ABOUTME: Wires Zod schemas to tool implementations with consistent structured outputs.
+
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { z } from "zod";
@@ -46,9 +52,21 @@ import {
 	writeFileTool,
 } from "./tools/write-file.js";
 
+function readPackageVersion(): string {
+	try {
+		const here = path.dirname(fileURLToPath(import.meta.url));
+		const pkgPath = path.resolve(here, "../package.json");
+		const raw = fs.readFileSync(pkgPath, "utf8");
+		const parsed = JSON.parse(raw) as { version?: unknown };
+		return typeof parsed.version === "string" ? parsed.version : "0.0.0";
+	} catch {
+		return "0.0.0";
+	}
+}
+
 const server = new McpServer({
 	name: "code-tools-mcp",
-	version: "0.1.0",
+	version: readPackageVersion(),
 });
 
 server.registerTool(
@@ -94,7 +112,8 @@ server.registerTool(
 		inputSchema: grepShape,
 		outputSchema: grepOutputShape,
 	},
-	async (input: z.infer<typeof grepInput>) => grepTool(input),
+	async (input: z.infer<typeof grepInput>, { signal }) =>
+		grepTool(input, signal),
 );
 
 server.registerTool(
@@ -125,8 +144,7 @@ server.registerTool(
 	"edit",
 	{
 		title: "Edit",
-		description:
-			"Targeted text replace; preview (apply=false); bulk via replace_all.",
+		description: "Targeted text replace; preview (apply=false).",
 		inputSchema: editShape,
 		outputSchema: editOutputShape,
 	},

@@ -1,11 +1,24 @@
+// ABOUTME: Applies a targeted string replacement to a workspace file.
+// ABOUTME: Supports preview diffs, enforces ignore/safety, and preserves line endings.
+
 import fs from "node:fs/promises";
 import path from "node:path";
 import * as Diff from "diff";
 import { z } from "zod";
-import { resolveWithinWorkspace } from "../utils/workspace.js";
+import { buildIgnoreFilter } from "../utils/ignore.js";
+import {
+	isSensitivePath,
+	relativize,
+	relativizePosix,
+	resolveWithinWorkspace,
+} from "../utils/workspace.js";
 
 export const editShape = {
-	file_path: z.string().describe("Absolute path to file within workspace."),
+	file_path: z
+		.string()
+		.describe(
+			"Absolute path within the workspace, or a path relative to workspace root.",
+		),
 	old_string: z
 		.string()
 		.describe("Text to replace. Use empty string to create a new file."),
@@ -20,6 +33,12 @@ export const editShape = {
 		.boolean()
 		.default(false)
 		.describe("If false (default), return diff preview without writing."),
+	allow_ignored: z
+		.boolean()
+		.optional()
+		.describe(
+			"Optional: allow editing files ignored by .gitignore (default false).",
+		),
 	modified_by_user: z.boolean().optional(),
 	ai_proposed_content: z.string().optional(),
 };
@@ -29,11 +48,13 @@ export type EditInput = z.infer<typeof editInput>;
 // Output schema for structured content returned by this tool
 export const editOutputShape = {
 	path: z.string().optional(),
+	relativePath: z.string().optional(),
 	applied: z.boolean().optional(),
 	diff: z.string().optional(),
 	occurrences: z.number().optional(),
 	summary: z.string().optional(),
 	error: z.string().optional(),
+	message: z.string().optional(),
 };
 
 function countOccurrences(haystack: string, needle: string): number {
@@ -42,16 +63,14 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 export async function editTool(input: EditInput) {
-	const { file_path, old_string, new_string, expected_replacements, apply } =
-		input;
-	if (!path.isAbsolute(file_path)) {
-		return {
-			content: [
-				{ type: "text" as const, text: `Path must be absolute: ${file_path}` },
-			],
-			structuredContent: { error: "PATH_NOT_ABSOLUTE" },
-		};
-	}
+	const {
+		file_path,
+		old_string,
+		new_string,
+		expected_replacements,
+		apply,
+		allow_ignored,
+	} = input;
 
 	// Check for no-change edits early
 	if (old_string === new_string) {
@@ -69,15 +88,57 @@ export async function editTool(input: EditInput) {
 		};
 	}
 
-	const abs = resolveWithinWorkspace(file_path);
+	let abs: string;
+	try {
+		abs = resolveWithinWorkspace(file_path);
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e);
+		return {
+			content: [{ type: "text" as const, text: msg }],
+			structuredContent: { error: "OUTSIDE_WORKSPACE", message: msg },
+		};
+	}
+
+	const relPosix = relativizePosix(abs);
+	if (isSensitivePath(relPosix)) {
+		const msg = `Refusing to edit sensitive path: ${relPosix}`;
+		return {
+			content: [{ type: "text" as const, text: msg }],
+			structuredContent: {
+				error: "SENSITIVE_PATH",
+				message: msg,
+				path: abs,
+				relativePath: relPosix,
+			},
+		};
+	}
+
 	let current: string | null = null;
 	let exists = false;
+	let hadCrlf = false;
 	try {
-		current = await fs.readFile(abs, "utf8");
-		// normalize line endings like the reference
-		current = current.replace(/\r\n/g, "\n");
+		const raw = await fs.readFile(abs, "utf8");
+		hadCrlf = raw.includes("\r\n");
+		current = raw.replace(/\r\n/g, "\n");
 		exists = true;
 	} catch {}
+
+	// Respect .gitignore unless allow_ignored is true.
+	if (!allow_ignored) {
+		const ig = await buildIgnoreFilter({ respectGitIgnore: true });
+		if (ig.ignores(relPosix)) {
+			const msg = `Refusing to edit ignored file: ${relativize(abs)}`;
+			return {
+				content: [{ type: "text" as const, text: msg }],
+				structuredContent: {
+					error: "FILE_IGNORED",
+					message: msg,
+					path: abs,
+					relativePath: relPosix,
+				},
+			};
+		}
+	}
 
 	if (!exists && old_string !== "") {
 		return {
@@ -109,7 +170,9 @@ export async function editTool(input: EditInput) {
 
 	const isNewFile = !exists && old_string === "";
 	const source = current ?? "";
-	const occ = isNewFile ? 0 : countOccurrences(source, old_string);
+	const oldNorm = old_string.replace(/\r\n/g, "\n");
+	const newNorm = new_string.replace(/\r\n/g, "\n");
+	const occ = isNewFile ? 0 : countOccurrences(source, oldNorm);
 	const expected = expected_replacements ?? 1;
 
 	if (!isNewFile) {
@@ -137,9 +200,7 @@ export async function editTool(input: EditInput) {
 		}
 	}
 
-	const newContent = isNewFile
-		? new_string
-		: source.split(old_string).join(new_string);
+	const newContent = isNewFile ? newNorm : source.split(oldNorm).join(newNorm);
 
 	// Check if content actually changed
 	if (!isNewFile && newContent === source) {
@@ -165,6 +226,7 @@ export async function editTool(input: EditInput) {
 		"Current",
 		"Proposed",
 	);
+	const rel = relativize(abs);
 
 	// Add summary to structured content
 	const summary = isNewFile
@@ -172,11 +234,12 @@ export async function editTool(input: EditInput) {
 		: `Replacing ${occ} occurrence${occ > 1 ? "s" : ""} in file`;
 
 	if (!apply) {
-		const preview = `Edit preview for ${abs} (not applied). To apply, call edit with apply: true.\n\n${diff}`;
+		const preview = `Edit preview for ${rel} (not applied). To apply, call edit with apply: true.\n\n${diff}`;
 		return {
 			content: [{ type: "text" as const, text: preview }],
 			structuredContent: {
 				path: abs,
+				relativePath: relPosix,
 				applied: false,
 				diff,
 				occurrences: isNewFile ? 0 : occ,
@@ -186,12 +249,14 @@ export async function editTool(input: EditInput) {
 	}
 
 	await fs.mkdir(path.dirname(abs), { recursive: true });
-	await fs.writeFile(abs, newContent, "utf8");
-	const result = `Applied edit to ${abs}.\n\n${diff}`;
+	const toWrite = hadCrlf ? newContent.replace(/\n/g, "\r\n") : newContent;
+	await fs.writeFile(abs, toWrite, "utf8");
+	const result = `Applied edit to ${rel}.\n\n${diff}`;
 	return {
 		content: [{ type: "text" as const, text: result }],
 		structuredContent: {
 			path: abs,
+			relativePath: relPosix,
 			applied: true,
 			diff,
 			occurrences: isNewFile ? 0 : occ,

@@ -1,13 +1,24 @@
+// ABOUTME: Writes a file within the workspace with a preview-first workflow.
+// ABOUTME: Enforces workspace containment, ignore rules, and basic safety blocks.
+
 import fs from "node:fs/promises";
 import path from "node:path";
 import * as Diff from "diff";
 import { z } from "zod";
-import { relativize, resolveWithinWorkspace } from "../utils/workspace.js";
+import { buildIgnoreFilter } from "../utils/ignore.js";
+import {
+	isSensitivePath,
+	relativize,
+	relativizePosix,
+	resolveWithinWorkspace,
+} from "../utils/workspace.js";
 
 export const writeFileShape = {
 	file_path: z
 		.string()
-		.describe("Absolute path of file to write within workspace."),
+		.describe(
+			"Absolute path within the workspace, or a path relative to workspace root.",
+		),
 	content: z.string().describe("Proposed full file content."),
 	// Parity-inspired options
 	apply: z
@@ -18,6 +29,12 @@ export const writeFileShape = {
 		.boolean()
 		.default(true)
 		.describe("Allow overwriting existing files."),
+	allow_ignored: z
+		.boolean()
+		.optional()
+		.describe(
+			"Optional: allow writing files ignored by .gitignore (default false).",
+		),
 	modified_by_user: z.boolean().optional(),
 	ai_proposed_content: z.string().optional(),
 };
@@ -27,6 +44,7 @@ export type WriteFileInput = z.infer<typeof writeFileInput>;
 // Output schema for structured content returned by this tool
 export const writeFileOutputShape = {
 	path: z.string().optional(),
+	relativePath: z.string().optional(),
 	applied: z.boolean().optional(),
 	diff: z.string().optional(),
 	summary: z.string().optional(),
@@ -98,34 +116,59 @@ function mapFileSystemError(error: unknown): { message: string; code: string } {
 }
 
 export async function writeFileTool(input: WriteFileInput) {
-	const { file_path, content, apply, overwrite, modified_by_user } = input;
-
-	if (!path.isAbsolute(file_path)) {
-		return {
-			content: [
-				{ type: "text" as const, text: `Path must be absolute: ${file_path}` },
-			],
-			structuredContent: { error: "PATH_NOT_ABSOLUTE" },
-		};
-	}
+	const {
+		file_path,
+		content,
+		apply,
+		overwrite,
+		modified_by_user,
+		allow_ignored,
+	} = input;
 
 	// Workspace validation with friendlier error
 	let abs: string;
 	try {
 		abs = resolveWithinWorkspace(file_path);
 	} catch (_e) {
+		const msg = `Cannot write outside workspace: ${file_path}`;
 		return {
-			content: [
-				{
-					type: "text" as const,
-					text: `Cannot write outside workspace: ${file_path}`,
-				},
-			],
+			content: [{ type: "text" as const, text: msg }],
 			structuredContent: {
 				error: "OUTSIDE_WORKSPACE",
-				message: "Path is outside the workspace root",
+				message: msg,
 			},
 		};
+	}
+
+	const relPosix = relativizePosix(abs);
+	if (isSensitivePath(relPosix)) {
+		const msg = `Refusing to write sensitive path: ${relPosix}`;
+		return {
+			content: [{ type: "text" as const, text: msg }],
+			structuredContent: {
+				error: "SENSITIVE_PATH",
+				message: msg,
+				path: abs,
+				relativePath: relPosix,
+			},
+		};
+	}
+
+	// Respect .gitignore unless allow_ignored is true.
+	if (!allow_ignored) {
+		const ig = await buildIgnoreFilter({ respectGitIgnore: true });
+		if (ig.ignores(relPosix)) {
+			const msg = `Refusing to write ignored file: ${relPosix}`;
+			return {
+				content: [{ type: "text" as const, text: msg }],
+				structuredContent: {
+					error: "FILE_IGNORED",
+					message: msg,
+					path: abs,
+					relativePath: relPosix,
+				},
+			};
+		}
 	}
 
 	const { exists, content: current } = await readIfExists(abs);
@@ -163,6 +206,7 @@ export async function writeFileTool(input: WriteFileInput) {
 			content: [{ type: "text" as const, text: previewText }],
 			structuredContent: {
 				path: abs,
+				relativePath: relPosix,
 				applied: false,
 				diff,
 				summary: `${summary} (preview)`,
@@ -194,6 +238,7 @@ export async function writeFileTool(input: WriteFileInput) {
 		content: [{ type: "text" as const, text: resultText }],
 		structuredContent: {
 			path: abs,
+			relativePath: relPosix,
 			applied: true,
 			diff,
 			summary: `${summary} (applied)`,

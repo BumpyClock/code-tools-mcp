@@ -1,3 +1,6 @@
+// ABOUTME: Re-exports tool schemas and inferred TypeScript types for clients.
+// ABOUTME: Keeps input/output typings in sync with the server's Zod definitions.
+
 import type { z } from "zod";
 
 /**
@@ -83,3 +86,13 @@ export type ReadManyFilesOutput = z.infer<
 		typeof import("../tools/read-many-files.js").readManyFilesOutputShape
 	>
 >;
+
+// Backwards/README-friendly aliases (structured content outputs)
+export type LsStructuredOutput = LsOutput;
+export type ReadFileStructuredOutput = ReadFileOutput;
+export type WriteFileStructuredOutput = WriteFileOutput;
+export type GrepStructuredOutput = GrepOutput;
+export type RipgrepStructuredOutput = RipgrepOutput;
+export type GlobStructuredOutput = GlobOutput;
+export type EditStructuredOutput = EditOutput;
+export type ReadManyFilesStructuredOutput = ReadManyFilesOutput;

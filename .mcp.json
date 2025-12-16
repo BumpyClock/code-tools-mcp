@@ -1,0 +1,10 @@
+{
+	"mcpServers": {
+		"code-tools": {
+			"type": "stdio",
+			"command": "pnpm",
+			"args": ["run", "start"],
+			"env": {}
+		}
+	}
+}

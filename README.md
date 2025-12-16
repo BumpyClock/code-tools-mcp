@@ -70,8 +70,8 @@ Add to your Claude config JSON:
 
 - Uses STDIO transport; avoid `console.log` (stdout). Any diagnostics are written to stderr.
 - File operations are restricted to the workspace root.
-- `read_file` caps file size at 2MB; `search` ignores common large folders.
-- Only `.gitignore` patterns are respected (`.geminiignore` is NOT supported).
+- `read_file` caps file size at 2MB; larger batch reads are capped via `read_many_files`.
+- Ignore rules honor nested `.gitignore`, `.git/info/exclude`, and common global ignore files (`.geminiignore` is NOT supported).
 
 
 ---
@@ -86,7 +86,7 @@ Add to your Claude config JSON:
 Lists directory contents with directories first, respects `.gitignore`.
 
 **Parameters:**
-- `path` (string, required): Absolute path to directory
+- `path` (string, required): Absolute path, or workspace-relative path to directory
 - `ignore` (string[], optional): Glob patterns to ignore
 - `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean }`
 
@@ -101,7 +101,7 @@ await client.callTool('list_directory', {
 Reads a file with optional pagination. Binary-aware.
 
 **Parameters:**
-- `absolute_path` (string, required): Absolute path to file
+- `absolute_path` (string, required): Absolute path, or workspace-relative path to file
 - `offset` (number, optional): Starting line (0-based)
 - `limit` (number, optional): Number of lines to return (max 2000)
 - `allow_ignored` (boolean, optional): Allow reading `.gitignore`-ignored files (default: false)
@@ -123,10 +123,11 @@ await client.callTool('read_file', {
 Creates or overwrites a file with preview mode.
 
 **Parameters:**
-- `file_path` (string, required): Absolute path of file to write
+- `file_path` (string, required): Absolute path, or workspace-relative path of file to write
 - `content` (string, required): Full file content
 - `apply` (boolean, default: false): If false, returns diff preview without writing
 - `overwrite` (boolean, default: true): Allow overwriting existing files
+- `allow_ignored` (boolean, optional): Allow writing `.gitignore`-ignored files (default: false)
 
 **Features:**
 - Preview mode by default (set `apply: true` to write)
@@ -146,12 +147,13 @@ Text/regex search with smart-case support.
 
 **Parameters:**
 - `pattern` (string, required): Search pattern (plain text or regex if `regex: true`)
-- `path` (string, optional): Directory path relative to workspace
+- `path` (string, optional): Directory/file path (absolute or workspace-relative)
 - `include` (string, optional): Glob filter (e.g., `**/*.{ts,tsx}`)
 - `exclude` (string | string[], optional): Glob exclusion patterns
 - `regex` (boolean, default: false): Treat pattern as regex
 - `ignore_case` (boolean, optional): Case-insensitive search. If undefined, uses smart-case (case-sensitive if pattern has uppercase)
 - `max_matches` (number, default: 2000): Maximum matches to return
+- `useDefaultExcludes` (boolean, optional): Apply default excludes (node_modules, dist, .git, etc.). Default true.
 
 **Features:**
 - Smart-case: automatically case-sensitive if pattern contains uppercase letters
@@ -174,7 +176,7 @@ Fast regex search using ripgrep binary (falls back to grep if unavailable).
 
 **Parameters:**
 - `pattern` (string, required): Regular expression
-- `path` (string, optional): Directory to search
+- `path` (string, optional): Directory or file to search (absolute or workspace-relative)
 - `include` (string | string[], optional): Glob include patterns
 - `exclude` (string | string[], optional): Glob exclude patterns
 - `ignore_case` (boolean, optional): If undefined, uses `--smart-case`
@@ -200,7 +202,7 @@ Matches files by glob pattern with two-tier sorting.
 
 **Parameters:**
 - `pattern` (string, required): Glob pattern (e.g., `**/*.ts`)
-- `path` (string, optional): Directory to search (defaults to workspace root)
+- `path` (string, optional): Directory to search (absolute or workspace-relative; defaults to workspace root)
 - `case_sensitive` (boolean, default: false): Case-sensitive matching
 - `respect_git_ignore` (boolean, default: true): Respect `.gitignore`
 
@@ -220,11 +222,12 @@ await client.callTool('glob', {
 Targeted text replacement with preview mode.
 
 **Parameters:**
-- `file_path` (string, required): Absolute path to file
+- `file_path` (string, required): Absolute path, or workspace-relative path to file
 - `old_string` (string, required): Text to replace (empty string creates new file)
 - `new_string` (string, required): Replacement text
 - `expected_replacements` (number, default: 1): Expected number of replacements
 - `apply` (boolean, default: false): If false, returns diff preview
+- `allow_ignored` (boolean, optional): Allow editing `.gitignore`-ignored files (default: false)
 
 **Features:**
 - Preview mode by default

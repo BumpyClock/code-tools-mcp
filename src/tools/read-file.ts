@@ -1,17 +1,27 @@
+// ABOUTME: Reads a single file from the workspace with size and paging limits.
+// ABOUTME: Enforces workspace containment, ignore rules, and basic safety blocks.
+
 import fs from "node:fs/promises";
 import path from "node:path";
 import { isText } from "istextorbinary";
 import mime from "mime-types";
 import { z } from "zod";
 import { buildIgnoreFilter } from "../utils/ignore.js";
-import { relativize, resolveWithinWorkspace } from "../utils/workspace.js";
+import {
+	isSensitivePath,
+	relativize,
+	relativizePosix,
+	resolveWithinWorkspace,
+} from "../utils/workspace.js";
 
 const MAX_BYTES = 2 * 1024 * 1024; // 2MB cap
 
 export const readFileShape = {
 	absolute_path: z
 		.string()
-		.describe("Absolute path to the file within the workspace."),
+		.describe(
+			"Absolute path within the workspace, or a path relative to workspace root.",
+		),
 	offset: z
 		.number()
 		.int()
@@ -38,16 +48,19 @@ export type ReadFileInput = z.infer<typeof readFileInput>;
 // Output schema for structured content returned by this tool
 export const readFileOutputShape = {
 	path: z.string().optional(),
+	relativePath: z.string().optional(),
 	mimeType: z.string().optional(),
 	binary: z.boolean().optional(),
 	size: z.number().optional(),
 	lineStart: z.number().optional(),
 	lineEnd: z.number().optional(),
 	totalLines: z.number().optional(),
+	text: z.string().optional(),
 	summary: z.string().optional(),
 	nextOffset: z.number().optional(),
 	truncated: z.boolean().optional(),
 	error: z.string().optional(),
+	message: z.string().optional(),
 };
 
 export async function readFileTool({
@@ -56,48 +69,84 @@ export async function readFileTool({
 	limit,
 	allow_ignored,
 }: ReadFileInput) {
-	if (!path.isAbsolute(absolute_path)) {
+	let abs: string;
+	try {
+		abs = resolveWithinWorkspace(absolute_path);
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e);
 		return {
-			content: [
-				{
-					type: "text" as const,
-					text: `Path must be absolute: ${absolute_path}`,
-				},
-			],
-			structuredContent: { error: "PATH_NOT_ABSOLUTE" },
+			content: [{ type: "text" as const, text: msg }],
+			structuredContent: {
+				error: "OUTSIDE_WORKSPACE",
+				message: msg,
+				summary: "Refused path outside workspace.",
+			},
 		};
 	}
-	const abs = resolveWithinWorkspace(absolute_path);
+
+	const relPosix = relativizePosix(abs);
+	if (isSensitivePath(relPosix)) {
+		const msg = `Refusing to read sensitive path: ${relPosix}`;
+		return {
+			content: [{ type: "text" as const, text: msg }],
+			structuredContent: {
+				error: "SENSITIVE_PATH",
+				message: msg,
+				path: abs,
+				relativePath: relPosix,
+				summary: "Refused sensitive path.",
+			},
+		};
+	}
+
 	// Respect .gitignore entries for safety/clarity unless allow_ignored is true
 	if (!allow_ignored) {
 		const ig = await buildIgnoreFilter({ respectGitIgnore: true });
-		const relPosix = relativize(abs).split(path.sep).join("/");
 		if (ig.ignores(relPosix)) {
 			const msg = `File is ignored by .gitignore: ${relativize(abs)}`;
 			return {
 				content: [{ type: "text" as const, text: msg }],
-				structuredContent: { error: "FILE_IGNORED", path: abs },
+				structuredContent: {
+					error: "FILE_IGNORED",
+					message: msg,
+					path: abs,
+					relativePath: relPosix,
+					summary: "Refused ignored file.",
+				},
 			};
 		}
 	}
 	const st = await fs.stat(abs).catch(() => null);
 	if (!st || !st.isFile()) {
+		const msg = `File not found or not a file: ${abs}`;
 		return {
-			content: [
-				{ type: "text" as const, text: `File not found or not a file: ${abs}` },
-			],
-			structuredContent: { error: "FILE_NOT_FOUND" },
+			content: [{ type: "text" as const, text: msg }],
+			structuredContent: {
+				error: "FILE_NOT_FOUND",
+				message: msg,
+				path: abs,
+				relativePath: relPosix,
+				summary: "File not found.",
+			},
 		};
 	}
 	if (st.size > MAX_BYTES) {
+		const msg = `File too large (${st.size} bytes). Cap is ${MAX_BYTES}.`;
 		return {
 			content: [
 				{
 					type: "text" as const,
-					text: `File too large (${st.size} bytes). Cap is ${MAX_BYTES}.`,
+					text: msg,
 				},
 			],
-			structuredContent: { error: "FILE_TOO_LARGE", size: st.size },
+			structuredContent: {
+				error: "FILE_TOO_LARGE",
+				message: msg,
+				path: abs,
+				relativePath: relPosix,
+				size: st.size,
+				summary: "File exceeds size cap.",
+			},
 		};
 	}
 	const buf = await fs.readFile(abs);
@@ -114,9 +163,11 @@ export async function readFileTool({
 			content: [{ type: "text" as const, text: info }],
 			structuredContent: {
 				path: abs,
+				relativePath: relPosix,
 				mimeType,
 				binary: true,
 				size: buf.byteLength,
+				summary: "Binary file; content not returned.",
 			},
 		};
 	}
@@ -131,10 +182,12 @@ export async function readFileTool({
 			content: [{ type: "text" as const, text: slice }],
 			structuredContent: {
 				path: abs,
+				relativePath: relPosix,
 				lineStart: start + 1,
 				lineEnd: end,
 				totalLines: lines.length,
 				mimeType,
+				text: slice,
 				summary: `Read lines ${start + 1}-${end} of ${lines.length}.`,
 				nextOffset: truncated ? end : undefined,
 				truncated,
@@ -146,9 +199,12 @@ export async function readFileTool({
 		content: [{ type: "text" as const, text }],
 		structuredContent: {
 			path: abs,
+			relativePath: relPosix,
 			mimeType,
 			binary: false,
+			size: buf.byteLength,
 			totalLines: lineCount,
+			text,
 			summary: `Read ${lineCount} line(s).`,
 		},
 	};

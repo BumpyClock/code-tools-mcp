@@ -1,3 +1,6 @@
+// ABOUTME: Lists directory entries within the workspace (non-recursive).
+// ABOUTME: Applies ignore rules and basic safety blocks for sensitive paths.
+
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -8,14 +11,18 @@ import {
 } from "../utils/ignore.js";
 import {
 	getWorkspaceRoot,
+	isSensitivePath,
 	relativize,
 	resolveWithinWorkspace,
+	toPosixPath,
 } from "../utils/workspace.js";
 
 export const lsShape = {
 	path: z
 		.string()
-		.describe("Absolute path to directory (must be within workspace)."),
+		.describe(
+			"Absolute path within the workspace, or a path relative to workspace root.",
+		),
 	ignore: z
 		.array(z.string())
 		.optional()
@@ -32,10 +39,12 @@ export type LsInput = z.infer<typeof lsInput>;
 // Output schema for structured content returned by this tool
 export const lsOutputShape = {
 	directory: z.string().optional(),
+	relativeDirectory: z.string().optional(),
 	entries: z.array(
 		z.object({
 			name: z.string(),
 			path: z.string(),
+			relativePath: z.string().optional(),
 			isDirectory: z.boolean(),
 			size: z.number(),
 			modifiedTime: z.string(),
@@ -51,7 +60,40 @@ export async function lsTool(input: LsInput) {
 	const candidate = path.isAbsolute(input.path)
 		? input.path
 		: path.join(root, input.path);
-	const abs = resolveWithinWorkspace(candidate);
+	let abs: string;
+	try {
+		abs = resolveWithinWorkspace(candidate);
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e);
+		return {
+			content: [{ type: "text" as const, text: msg }],
+			structuredContent: {
+				directory: candidate,
+				relativeDirectory: undefined,
+				entries: [],
+				gitIgnoredCount: 0,
+				summary: "Directory not found",
+				error: "OUTSIDE_WORKSPACE",
+			},
+		};
+	}
+
+	const relDirPosix = toPosixPath(path.relative(root, abs) || ".");
+	if (isSensitivePath(relDirPosix)) {
+		const msg = `Refusing to list sensitive path: ${relDirPosix}`;
+		return {
+			content: [{ type: "text" as const, text: msg }],
+			structuredContent: {
+				directory: abs,
+				relativeDirectory: relDirPosix,
+				entries: [],
+				gitIgnoredCount: 0,
+				summary: "Refused sensitive path",
+				error: "SENSITIVE_PATH",
+			},
+		};
+	}
+
 	const st = await fs.stat(abs).catch(() => null);
 	if (!st) {
 		return {
@@ -63,6 +105,7 @@ export async function lsTool(input: LsInput) {
 			],
 			structuredContent: {
 				directory: abs,
+				relativeDirectory: relDirPosix,
 				entries: [],
 				gitIgnoredCount: 0,
 				summary: "Directory not found",
@@ -80,6 +123,7 @@ export async function lsTool(input: LsInput) {
 			],
 			structuredContent: {
 				directory: abs,
+				relativeDirectory: relDirPosix,
 				entries: [],
 				gitIgnoredCount: 0,
 				summary: "Path is not a directory",
@@ -98,6 +142,7 @@ export async function lsTool(input: LsInput) {
 	const entries = [] as Array<{
 		name: string;
 		path: string;
+		relativePath?: string;
 		isDirectory: boolean;
 		size: number;
 		modifiedTime: string;
@@ -108,7 +153,8 @@ export async function lsTool(input: LsInput) {
 		const relToRoot = path.relative(root, full);
 
 		// ignore lib works with posixish paths; convert separators
-		const relPosix = relToRoot.split(path.sep).join("/");
+		const relPosix = toPosixPath(relToRoot);
+		if (isSensitivePath(relPosix)) continue;
 		if (ig.ignores(relPosix)) {
 			gitIgnoredCount += 1;
 			continue;
@@ -119,6 +165,7 @@ export async function lsTool(input: LsInput) {
 			entries.push({
 				name,
 				path: full,
+				relativePath: relPosix,
 				isDirectory: s.isDirectory(),
 				size: s.isDirectory() ? 0 : s.size,
 				modifiedTime: s.mtime.toISOString(),
@@ -157,6 +204,7 @@ export async function lsTool(input: LsInput) {
 		content: [{ type: "text" as const, text }],
 		structuredContent: {
 			directory: abs,
+			relativeDirectory: relDirPosix,
 			entries,
 			gitIgnoredCount,
 			summary: `Listed ${entries.length} entr${entries.length === 1 ? "y" : "ies"}.`,

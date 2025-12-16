@@ -1,3 +1,6 @@
+// ABOUTME: Reads multiple text files in the workspace and concatenates results.
+// ABOUTME: Applies ignore rules, safety checks, and output size caps.
+
 import fs from "node:fs/promises";
 import path from "node:path";
 import fg from "fast-glob";
@@ -6,7 +9,9 @@ import { z } from "zod";
 import { buildIgnoreFilter } from "../utils/ignore.js";
 import {
 	getWorkspaceRoot,
+	isSensitivePath,
 	resolveWithinWorkspace,
+	toPosixPath,
 } from "../utils/workspace.js";
 
 export const readManyFilesShape = {
@@ -34,10 +39,12 @@ export type ReadManyFilesInput = z.infer<typeof readManyFilesInput>;
 // Output schema for structured content returned by this tool
 export const readManyFilesOutputShape = {
 	files: z.array(z.string()),
+	relativeFiles: z.array(z.string()).optional(),
 	skipped: z.array(z.object({ path: z.string(), reason: z.string() })),
 	skipCounts: z
 		.object({
 			ignored: z.number().optional(),
+			sensitive: z.number().optional(),
 			binary: z.number().optional(),
 			tooLarge: z.number().optional(),
 			notFile: z.number().optional(),
@@ -46,6 +53,7 @@ export const readManyFilesOutputShape = {
 		})
 		.optional(),
 	totalBytes: z.number(),
+	text: z.string().optional(),
 	truncated: z.boolean().optional(),
 	totalCapReached: z.boolean().optional(),
 	summary: z.string(),
@@ -73,6 +81,8 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 			cwd: root,
 			absolute: true,
 			dot: true,
+			onlyFiles: true,
+			followSymbolicLinks: false,
 			ignore: excludes,
 		});
 		for (const p of absMatches) {
@@ -85,22 +95,44 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 			}
 		}
 	}
-	const filesArr = Array.from(files);
+	const filesArr = Array.from(files).sort((a, b) =>
+		path.relative(root, a).localeCompare(path.relative(root, b)),
+	);
 	if (filesArr.length === 0) {
 		return {
 			content: [{ type: "text" as const, text: "No files matched." }],
-			structuredContent: { files: [], summary: "No files matched." },
+			structuredContent: {
+				files: [],
+				relativeFiles: [],
+				skipped: [],
+				skipCounts: {
+					ignored: 0,
+					sensitive: 0,
+					binary: 0,
+					tooLarge: 0,
+					notFile: 0,
+					totalCapReached: 0,
+					readError: 0,
+				},
+				totalBytes: 0,
+				text: "",
+				truncated: false,
+				totalCapReached: false,
+				summary: "No files matched.",
+			},
 		};
 	}
 
 	let totalBytes = 0;
 	let output = "";
 	const included: string[] = [];
+	const includedRel: string[] = [];
 	const skipped: Array<{ path: string; reason: string }> = [];
 
 	// Track skip reasons for aggregation
 	const skipCounts = {
 		ignored: 0,
+		sensitive: 0,
 		binary: 0,
 		tooLarge: 0,
 		notFile: 0,
@@ -110,7 +142,12 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 	let totalCapReached = false;
 
 	for (const abs of filesArr) {
-		const relPosix = path.relative(root, abs).split(path.sep).join("/");
+		const relPosix = toPosixPath(path.relative(root, abs));
+		if (isSensitivePath(relPosix)) {
+			skipped.push({ path: abs, reason: "sensitive" });
+			skipCounts.sensitive++;
+			continue;
+		}
 		if (ig.ignores(relPosix)) {
 			skipped.push({ path: abs, reason: "ignored" });
 			skipCounts.ignored++;
@@ -148,6 +185,7 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 			output += chunk;
 			totalBytes = projected;
 			included.push(abs);
+			includedRel.push(relPosix);
 		} catch (_e) {
 			skipped.push({ path: abs, reason: "read error" });
 			skipCounts.readError++;
@@ -162,6 +200,8 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 		const skipSummary: string[] = [];
 		if (skipCounts.ignored > 0)
 			skipSummary.push(`${skipCounts.ignored} ignored`);
+		if (skipCounts.sensitive > 0)
+			skipSummary.push(`${skipCounts.sensitive} sensitive`);
 		if (skipCounts.binary > 0) skipSummary.push(`${skipCounts.binary} binary`);
 		if (skipCounts.tooLarge > 0)
 			skipSummary.push(`${skipCounts.tooLarge} too large`);
@@ -178,9 +218,11 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 		content: [{ type: "text" as const, text: output }],
 		structuredContent: {
 			files: included,
+			relativeFiles: includedRel,
 			skipped,
 			skipCounts,
 			totalBytes,
+			text: output,
 			truncated: totalCapReached,
 			totalCapReached,
 			summary: summaryParts.join(" "),
