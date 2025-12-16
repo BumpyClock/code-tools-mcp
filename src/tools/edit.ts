@@ -30,6 +30,12 @@ export const editShape = {
 		.min(1)
 		.optional()
 		.describe("Expected number of replacements (default 1)."),
+	replace_all: z
+		.boolean()
+		.optional()
+		.describe(
+			"Replace all occurrences without requiring expected_replacements. If expected_replacements is provided, it is still validated.",
+		),
 	apply: z
 		.boolean()
 		.default(false)
@@ -119,6 +125,7 @@ export async function editTool(input: EditInput) {
 		old_string,
 		new_string,
 		expected_replacements,
+		replace_all,
 		apply,
 		allow_ignored,
 	} = input;
@@ -238,7 +245,20 @@ export async function editTool(input: EditInput) {
 				structuredContent: { error: ErrorCode.EDIT_NO_OCCURRENCE_FOUND },
 			};
 		}
-		if (occ !== expected) {
+		if (!replace_all && occ !== expected) {
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `Failed to edit: expected ${expected} occurrences but found ${occ}.`,
+					},
+				],
+				structuredContent: {
+					error: ErrorCode.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+				},
+			};
+		}
+		if (replace_all && expected_replacements !== undefined && occ !== expected) {
 			return {
 				content: [
 					{
