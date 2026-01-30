@@ -1,29 +1,27 @@
 {
-  "permissions": {
-    "allow": [
-      "mcp__code-tools-mcp__list_directory",
-      "mcp__code-tools-mcp__read_many_files",
-      "mcp__sequentialthinking__sequentialthinking",
-      "mcp__code-tools-mcp__glob",
-      "mcp__code-tools-mcp__read_file",
-      "mcp__code-tools-mcp__edit",
-      "Bash(dir /B \"C:\\Users\\adity\\Projects\\code-tools-mcp\\ai_docs\")",
-      "mcp__code-tools__list_directory",
-      "mcp__code-tools__read_many_files",
-      "mcp__code-tools__read_file",
-      "mcp__code-tools__write_file",
-      "mcp__code-tools__edit",
-      "mcp__code-tools__grep",
-      "mcp__code-tools__ripgrep",
-      "mcp__code-tools__glob",
-      "mcp__code-tools__search_file_content",
-      "mcp__code-tools__replace"
-    ],
-    "deny": [],
-    "ask": []
-  },
-  "enableAllProjectMcpServers": true,
-  "enabledMcpjsonServers": [
-    "code-tools"
-  ]
+	"permissions": {
+		"allow": [
+			"mcp__code-tools-mcp__list_directory",
+			"mcp__code-tools-mcp__read_many_files",
+			"mcp__sequentialthinking__sequentialthinking",
+			"mcp__code-tools-mcp__glob",
+			"mcp__code-tools-mcp__read_file",
+			"mcp__code-tools-mcp__edit",
+			"Bash(dir /B \"C:\\Users\\adity\\Projects\\code-tools-mcp\\ai_docs\")",
+			"mcp__code-tools__list_directory",
+			"mcp__code-tools__read_many_files",
+			"mcp__code-tools__read_file",
+			"mcp__code-tools__write_file",
+			"mcp__code-tools__edit",
+			"mcp__code-tools__grep",
+			"mcp__code-tools__ripgrep",
+			"mcp__code-tools__glob",
+			"mcp__code-tools__search_file_content",
+			"mcp__code-tools__replace"
+		],
+		"deny": [],
+		"ask": []
+	},
+	"enableAllProjectMcpServers": true,
+	"enabledMcpjsonServers": ["code-tools"]
 }

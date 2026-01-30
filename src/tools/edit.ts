@@ -126,7 +126,9 @@ function applyReplacement(
 		return { newContent: newString, occurrences: 1 };
 	}
 	if (currentContent === null) {
-		return { newContent: "", occurrences: 0 };
+		throw new Error(
+			"Invariant violation: currentContent is null for an existing file.",
+		);
 	}
 	if (oldString === "") {
 		return { newContent: currentContent, occurrences: 0 };
@@ -178,8 +180,8 @@ export async function editTool(input: EditInput) {
 		const msg = `Refusing to edit sensitive path: ${relPosix}`;
 		return {
 			llmContent: msg,
-			returnDisplay: "Error: Path not in workspace.",
-			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
+			returnDisplay: "Error: Sensitive path.",
+			error: { message: msg, type: ToolErrorType.SENSITIVE_PATH },
 		};
 	}
 

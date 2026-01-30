@@ -82,6 +82,9 @@ function initWorkspaceRoots(): string[] {
 
 function initWorkspaceContext(): WorkspaceContext {
 	const roots = getWorkspaceRoots();
+	if (roots.length === 0) {
+		throw new Error("Workspace roots are empty; cannot initialize context.");
+	}
 	const primary = roots[0];
 	const extras = roots.slice(1);
 	return new WorkspaceContext(primary, extras);
@@ -144,7 +147,14 @@ export function setWorkspaceRoot(root: string) {
 }
 
 export function setWorkspaceRoots(roots: readonly string[]) {
-	if (roots.length === 0) return;
+	if (roots.length === 0) {
+		WORKSPACE_ROOT = null;
+		WORKSPACE_ROOTS = [];
+		WORKSPACE_ROOTS_REAL = null;
+		WORKSPACE_CONTEXT = null;
+		console.warn("[workspace] Cleared workspace roots.");
+		return;
+	}
 	WORKSPACE_ROOTS = roots.map((entry) => path.resolve(entry));
 	WORKSPACE_ROOT = WORKSPACE_ROOTS[0];
 	WORKSPACE_ROOTS_REAL = null;

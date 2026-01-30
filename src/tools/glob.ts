@@ -164,7 +164,7 @@ export async function globTool(input: GlobInput, _signal?: AbortSignal) {
 	if (allEntries.length === 0) {
 		let message = `No files found matching pattern "${input.pattern}"`;
 		if (searchTargets.length === 1) {
-			message += ` within ${searchTargets[0]?.dir}`;
+			message += ` within ${searchTargets[0].dir}`;
 		} else {
 			message += ` within ${searchTargets.length} workspace directories`;
 		}
@@ -185,7 +185,7 @@ export async function globTool(input: GlobInput, _signal?: AbortSignal) {
 
 	let resultMessage = `Found ${fileCount} file(s) matching "${input.pattern}"`;
 	if (searchTargets.length === 1) {
-		resultMessage += ` within ${searchTargets[0]?.dir}`;
+		resultMessage += ` within ${searchTargets[0].dir}`;
 	} else {
 		resultMessage += ` across ${searchTargets.length} workspace directories`;
 	}

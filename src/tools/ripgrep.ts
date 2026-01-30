@@ -24,6 +24,7 @@ const DEFAULT_EXCLUDES = [
 	"*.log",
 	"*.tmp",
 ];
+const MAX_REGEX_LENGTH = 1000;
 
 export const searchFileContentShape = {
 	pattern: z.string().describe("The pattern to search for."),
@@ -78,6 +79,13 @@ interface GrepMatch {
 }
 
 let RG_ON_PATH: boolean | null = null;
+
+function isProbablySafeRegex(pattern: string): boolean {
+	if (pattern.length > MAX_REGEX_LENGTH) return false;
+	const nestedQuantifiers = /(\([^)]*[+*?][^)]*\))[+*?]/;
+	const repeatedWildcards = /(\.\*){2,}/;
+	return !nestedQuantifiers.test(pattern) && !repeatedWildcards.test(pattern);
+}
 
 function haveRgOnPath(): Promise<boolean> {
 	if (RG_ON_PATH !== null) return Promise.resolve(RG_ON_PATH);
@@ -211,10 +219,19 @@ async function fallbackSearch(
 				ignore,
 			});
 
-	const pattern = fixedStrings ? input.pattern : input.pattern;
+	const pattern = input.pattern;
 	let regex: RegExp | null = null;
+	let useFixedStrings = fixedStrings;
 	if (!fixedStrings) {
-		regex = new RegExp(pattern, caseSensitive ? "" : "i");
+		if (isProbablySafeRegex(pattern)) {
+			try {
+				regex = new RegExp(pattern, caseSensitive ? "" : "i");
+			} catch {
+				useFixedStrings = true;
+			}
+		} else {
+			useFixedStrings = true;
+		}
 	}
 
 	for (const absFile of entries) {
@@ -228,7 +245,7 @@ async function fallbackSearch(
 		for (let i = 0; i < lines.length; i++) {
 			if (signal?.aborted) break;
 			const line = lines[i] ?? "";
-			const matched = fixedStrings
+			const matched = useFixedStrings
 				? line.includes(pattern)
 				: (regex?.test(line) ?? false);
 			if (!matched) continue;
@@ -294,6 +311,7 @@ export async function searchFileContentTool(
 
 	let matches: GrepMatch[] = [];
 	let wasTruncated = false;
+	let usedRipgrep = false;
 
 	let rgCmd: string | null = null;
 	if (await haveRgOnPath()) {
@@ -303,6 +321,7 @@ export async function searchFileContentTool(
 	}
 
 	if (rgCmd) {
+		usedRipgrep = true;
 		const args: string[] = ["--json"];
 		if (!input.case_sensitive) args.push("--ignore-case");
 		if (input.fixed_strings) {
@@ -364,7 +383,7 @@ export async function searchFileContentTool(
 	if (signal) signal.removeEventListener("abort", onAbort);
 	timeoutController.signal.removeEventListener("abort", onAbort);
 
-	if (!input.no_ignore) {
+	if (!usedRipgrep && !input.no_ignore) {
 		const ig = await buildIgnoreFilter(
 			{ respectGitIgnore: true },
 			resolved.root,

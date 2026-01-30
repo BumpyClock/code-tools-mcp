@@ -1,17 +1,29 @@
 // ABOUTME: Gemini CLI-compatible tool result schema for structured outputs.
 
 import { z } from "zod";
+import { ToolErrorType } from "./tool-error-type.js";
 
-export const toolContentShape = z.object({
-	type: z.enum(["text", "image", "resource"]),
-	text: z.string().optional(),
-	data: z.string().optional(),
-	mimeType: z.string().optional(),
-});
+export const toolContentShape = z.discriminatedUnion("type", [
+	z.object({
+		type: z.literal("text"),
+		text: z.string(),
+	}),
+	z.object({
+		type: z.literal("image"),
+		data: z.string(),
+		mimeType: z.string(),
+	}),
+	z.object({
+		type: z.literal("resource"),
+		data: z.string(),
+		mimeType: z.string().optional(),
+		uri: z.string().optional(),
+	}),
+]);
 
 export const toolErrorShape = z.object({
 	message: z.string(),
-	type: z.string().optional(),
+	type: z.nativeEnum(ToolErrorType).optional(),
 });
 
 export const toolResultShape = {

@@ -6,10 +6,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
 import { isText } from "istextorbinary";
-import mime from "mime-types";
 import { z } from "zod";
 import { ToolErrorType } from "../types/tool-error-type.js";
-import { type ToolContent, toolResultShape } from "../types/tool-result.js";
+import { toolResultShape } from "../types/tool-result.js";
+import {
+	getMimeType,
+	isSupportedBinary,
+	MAX_BINARY_BYTES,
+	mapBinaryPart,
+} from "../utils/file-content.js";
 import { buildIgnoreFilter } from "../utils/ignore.js";
 import {
 	isSensitivePath,
@@ -18,21 +23,8 @@ import {
 } from "../utils/workspace.js";
 
 const MAX_FULL_READ_BYTES = 2 * 1024 * 1024;
-const MAX_BINARY_BYTES = 5 * 1024 * 1024;
 const SNIFF_BYTES = 8192;
 const DEFAULT_PAGED_LINE_LIMIT = 2000;
-
-const IMAGE_EXTS = new Set([
-	".png",
-	".jpg",
-	".jpeg",
-	".gif",
-	".webp",
-	".svg",
-	".bmp",
-]);
-const AUDIO_EXTS = new Set([".mp3", ".wav", ".aiff", ".aac", ".ogg", ".flac"]);
-const PDF_EXTS = new Set([".pdf"]);
 
 export const readFileShape = {
 	file_path: z
@@ -68,23 +60,6 @@ async function sniffIsText(abs: string, size: number): Promise<boolean> {
 	}
 }
 
-function getMimeType(abs: string): string {
-	const ext = path.extname(abs).toLowerCase();
-	if (ext === ".ts" || ext === ".tsx") return "text/typescript";
-	return (mime.lookup(abs) || "text/plain").toString();
-}
-
-function isSupportedBinary(ext: string): boolean {
-	return IMAGE_EXTS.has(ext) || AUDIO_EXTS.has(ext) || PDF_EXTS.has(ext);
-}
-
-function mapBinaryPart(mimeType: string, data: string): ToolContent {
-	if (mimeType.startsWith("image/")) {
-		return { type: "image", data, mimeType };
-	}
-	return { type: "resource", data, mimeType };
-}
-
 function buildTruncatedMessage(
 	content: string,
 	start: number,
@@ -92,7 +67,15 @@ function buildTruncatedMessage(
 	total: number,
 	nextOffset: number,
 ): string {
-	return `IMPORTANT: The file content has been truncated.\nStatus: Showing lines ${start}-${end} of ${total} total lines.\nAction: To read more of the file, you can use the 'offset' and 'limit' parameters in a subsequent 'read_file' call. For example, to read the next section of the file, use offset: ${nextOffset}.\n\n--- FILE CONTENT (truncated) ---\n${content}`;
+	const lines = [
+		"IMPORTANT: The file content has been truncated.",
+		`Status: Showing lines ${start}-${end} of ${total} total lines.`,
+		`Action: To read more of the file, you can use the 'offset' and 'limit' parameters in a subsequent 'read_file' call. For example, to read the next section of the file, use offset: ${nextOffset}.`,
+		"",
+		"--- FILE CONTENT (truncated) ---",
+		content,
+	];
+	return lines.join("\n");
 }
 
 export async function readFileTool(input: ReadFileInput) {
@@ -116,7 +99,7 @@ export async function readFileTool(input: ReadFileInput) {
 		return {
 			llmContent: msg,
 			returnDisplay: "Refused sensitive path.",
-			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
+			error: { message: msg, type: ToolErrorType.SENSITIVE_PATH },
 		};
 	}
 
@@ -188,9 +171,8 @@ export async function readFileTool(input: ReadFileInput) {
 
 	if (allowFullRead && lineLimit === undefined && offset === undefined) {
 		const text = fullBuf ? fullBuf.toString("utf8") : "";
-		const rendered = text;
 		return {
-			llmContent: rendered,
+			llmContent: text,
 			returnDisplay: "Read file.",
 		};
 	}
@@ -210,7 +192,9 @@ export async function readFileTool(input: ReadFileInput) {
 		if (currentLine < lineOffset) continue;
 		if (lineLimit !== undefined && collected.length >= lineLimit) {
 			truncated = true;
-			continue;
+			endLine = lineOffset + collected.length;
+			rl.close();
+			break;
 		}
 		collected.push(line);
 		endLine = lineOffset + collected.length;
@@ -219,12 +203,13 @@ export async function readFileTool(input: ReadFileInput) {
 	const content = collected.join("\n");
 	if (truncated) {
 		const nextOffset = lineOffset + collected.length;
+		const totalLines = lineOffset + collected.length;
 		return {
 			llmContent: buildTruncatedMessage(
 				content,
 				startLine,
 				endLine,
-				lineCount,
+				totalLines,
 				nextOffset,
 			),
 			returnDisplay: "Read file (truncated).",

@@ -5,15 +5,19 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import fg from "fast-glob";
 import { isText } from "istextorbinary";
-import mime from "mime-types";
 import { z } from "zod";
 import { type ToolContent, toolResultShape } from "../types/tool-result.js";
+import {
+	getMimeType,
+	isSupportedBinary,
+	MAX_BINARY_BYTES,
+	mapBinaryPart,
+} from "../utils/file-content.js";
 import { buildIgnoreFilter } from "../utils/ignore.js";
 import {
 	getPrimaryWorkspaceRoot,
 	getWorkspaceRoots,
 	isSensitivePath,
-	relativize,
 	relativizePosix,
 	resolveWithinWorkspace,
 } from "../utils/workspace.js";
@@ -55,40 +59,13 @@ const DEFAULT_EXCLUDES = [
 const DEFAULT_OUTPUT_SEPARATOR_FORMAT = "--- {filePath} ---";
 const DEFAULT_OUTPUT_TERMINATOR = "\n--- End of content ---";
 const TOTAL_BYTE_CAP = 2 * 1024 * 1024;
-const MAX_BINARY_BYTES = 5 * 1024 * 1024;
-
-const IMAGE_EXTS = new Set([
-	".png",
-	".jpg",
-	".jpeg",
-	".gif",
-	".webp",
-	".svg",
-	".bmp",
-]);
-const AUDIO_EXTS = new Set([".mp3", ".wav", ".aiff", ".aac", ".ogg", ".flac"]);
-const PDF_EXTS = new Set([".pdf"]);
-
-function getMimeType(abs: string): string {
-	const ext = path.extname(abs).toLowerCase();
-	if (ext === ".ts" || ext === ".tsx") return "text/typescript";
-	return (mime.lookup(abs) || "text/plain").toString();
-}
-
-function isSupportedBinary(ext: string): boolean {
-	return IMAGE_EXTS.has(ext) || AUDIO_EXTS.has(ext) || PDF_EXTS.has(ext);
-}
-
-function mapBinaryPart(mimeType: string, data: string): ToolContent {
-	if (mimeType.startsWith("image/")) {
-		return { type: "image", data, mimeType };
-	}
-	return { type: "resource", data, mimeType };
-}
+const MAX_TEXT_BYTES = 1024 * 1024;
 
 function isExplicitBinaryRequest(patterns: string[], ext: string): boolean {
 	const lowerExt = ext.toLowerCase();
-	return patterns.some((pattern) => pattern.toLowerCase().includes(lowerExt));
+	const escaped = lowerExt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const extRegex = new RegExp(`${escaped}(?:$|[\\\\/]|\\?|#)`);
+	return patterns.some((pattern) => extRegex.test(pattern.toLowerCase()));
 }
 
 async function globWithinRoot(
@@ -157,7 +134,11 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 		Awaited<ReturnType<typeof buildIgnoreFilter>>
 	>();
 
-	for (const abs of Array.from(filesToConsider)) {
+	const sortedFilesToConsider = Array.from(filesToConsider).sort((a, b) =>
+		a.localeCompare(b),
+	);
+
+	for (const abs of sortedFilesToConsider) {
 		let resolvedRoot = primaryRoot;
 		try {
 			resolvedRoot = resolveWithinWorkspace(abs).root;
@@ -208,11 +189,11 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 			}
 			const buf = await fs.readFile(abs);
 			contentParts.push(mapBinaryPart(mimeType, buf.toString("base64")));
-			processedFilesRelativePaths.push(relativize(abs, primaryRoot));
+			processedFilesRelativePaths.push(relativizePosix(abs, primaryRoot));
 			continue;
 		}
 
-		if (st.size > 1024 * 1024) {
+		if (st.size > MAX_TEXT_BYTES) {
 			skippedFiles.push({ path: relPosix, reason: "too large" });
 			continue;
 		}
@@ -242,7 +223,7 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 		}
 		contentParts.push({ type: "text", text: chunk });
 		totalBytes = projected;
-		processedFilesRelativePaths.push(relativize(abs, primaryRoot));
+		processedFilesRelativePaths.push(relativizePosix(abs, primaryRoot));
 	}
 
 	let displayMessage = `### ReadManyFiles Result (Target Dir: \`${primaryRoot}\`)\n\n`;

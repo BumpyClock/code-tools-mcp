@@ -1,6 +1,7 @@
 // ABOUTME: Manages multiple workspace directories and validates paths against them.
 
 import fs from "node:fs";
+import fsPromises from "node:fs/promises";
 import path from "node:path";
 
 export interface AddDirectoriesResult {
@@ -16,23 +17,23 @@ export class WorkspaceContext {
 		readonly targetDir: string,
 		additionalDirectories: string[] = [],
 	) {
-		this.addDirectory(targetDir);
-		this.addDirectories(additionalDirectories);
+		this.addDirectorySync(targetDir);
+		this.addDirectoriesSync(additionalDirectories);
 		this.initialDirectories = new Set(this.directories);
 	}
 
-	addDirectory(directory: string): void {
-		const result = this.addDirectories([directory]);
+	async addDirectory(directory: string): Promise<void> {
+		const result = await this.addDirectories([directory]);
 		if (result.failed.length > 0) {
 			throw result.failed[0]?.error;
 		}
 	}
 
-	addDirectories(directories: string[]): AddDirectoriesResult {
+	async addDirectories(directories: string[]): Promise<AddDirectoriesResult> {
 		const result: AddDirectoriesResult = { added: [], failed: [] };
 		for (const directory of directories) {
 			try {
-				const resolved = this.resolveAndValidateDir(directory);
+				const resolved = await this.resolveAndValidateDir(directory);
 				this.directories.add(resolved);
 				result.added.push(directory);
 			} catch (err) {
@@ -46,7 +47,7 @@ export class WorkspaceContext {
 	setDirectories(directories: readonly string[]): void {
 		const next = new Set<string>();
 		for (const dir of directories) {
-			next.add(this.resolveAndValidateDir(dir));
+			next.add(this.resolveAndValidateDirSync(dir));
 		}
 		this.directories = next;
 	}
@@ -71,7 +72,43 @@ export class WorkspaceContext {
 		}
 	}
 
-	private resolveAndValidateDir(directory: string): string {
+	private addDirectorySync(directory: string): void {
+		const result = this.addDirectoriesSync([directory]);
+		if (result.failed.length > 0) {
+			throw result.failed[0]?.error;
+		}
+	}
+
+	private addDirectoriesSync(directories: string[]): AddDirectoriesResult {
+		const result: AddDirectoriesResult = { added: [], failed: [] };
+		for (const directory of directories) {
+			try {
+				const resolved = this.resolveAndValidateDirSync(directory);
+				this.directories.add(resolved);
+				result.added.push(directory);
+			} catch (err) {
+				const error = err instanceof Error ? err : new Error(String(err));
+				result.failed.push({ path: directory, error });
+			}
+		}
+		return result;
+	}
+
+	private async resolveAndValidateDir(directory: string): Promise<string> {
+		const absolutePath = path.resolve(this.targetDir, directory);
+		try {
+			await fsPromises.access(absolutePath);
+		} catch {
+			throw new Error(`Directory does not exist: ${absolutePath}`);
+		}
+		const stats = await fsPromises.stat(absolutePath);
+		if (!stats.isDirectory()) {
+			throw new Error(`Path is not a directory: ${absolutePath}`);
+		}
+		return fsPromises.realpath(absolutePath);
+	}
+
+	private resolveAndValidateDirSync(directory: string): string {
 		const absolutePath = path.resolve(this.targetDir, directory);
 		if (!fs.existsSync(absolutePath)) {
 			throw new Error(`Directory does not exist: ${absolutePath}`);

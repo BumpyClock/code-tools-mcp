@@ -2,6 +2,7 @@
 // ABOUTME: Hosts the MCP stdio server and registers workspace-safe code tools.
 // ABOUTME: Wires Zod schemas to tool implementations with consistent structured outputs.
 
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -77,10 +78,11 @@ function toContent(llmContent?: string | ToolContent[]): McpContent[] {
 				mimeType: part.mimeType ?? "application/octet-stream",
 			};
 		}
+		const resourceUri = part.uri ?? `inline://resource/${randomUUID()}`;
 		return {
 			type: "resource",
 			resource: {
-				uri: "inline://resource",
+				uri: resourceUri,
 				blob: part.data ?? "",
 				mimeType: part.mimeType,
 			},
@@ -152,6 +154,18 @@ server.registerTool(
 	{
 		title: "Search File Content",
 		description: "FAST regex search powered by ripgrep.",
+		inputSchema: searchFileContentShape,
+		outputSchema: searchFileContentOutputShape,
+	},
+	async (input: z.infer<typeof searchFileContentInput>, { signal }) =>
+		wrapResult(await searchFileContentTool(input, signal)),
+);
+
+server.registerTool(
+	"ripgrep",
+	{
+		title: "Ripgrep (Deprecated)",
+		description: "Deprecated alias for search_file_content.",
 		inputSchema: searchFileContentShape,
 		outputSchema: searchFileContentOutputShape,
 	},

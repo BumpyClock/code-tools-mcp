@@ -59,7 +59,7 @@ export async function lsTool(input: LsInput) {
 		return {
 			llmContent: msg,
 			returnDisplay: "Refused sensitive path.",
-			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
+			error: { message: msg, type: ToolErrorType.SENSITIVE_PATH },
 		};
 	}
 
@@ -126,7 +126,10 @@ export async function lsTool(input: LsInput) {
 				size: isDirectory ? 0 : stats.size,
 				modifiedTime: stats.mtime,
 			});
-		} catch {}
+		} catch (error) {
+			const errorMsg = error instanceof Error ? error.message : String(error);
+			console.warn(`[ls] Failed to stat ${full}: ${errorMsg}`);
+		}
 	}
 
 	entries.sort((a, b) => {

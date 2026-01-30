@@ -136,7 +136,7 @@ export async function writeFileTool(input: WriteFileInput) {
 		return {
 			llmContent: msg,
 			returnDisplay: msg,
-			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
+			error: { message: msg, type: ToolErrorType.SENSITIVE_PATH },
 		};
 	}
 
@@ -186,8 +186,14 @@ export async function writeFileTool(input: WriteFileInput) {
 			: `Successfully overwrote file: ${abs}.`,
 	];
 	if (modified_by_user) {
+		const lineCount = content.split(/\r?\n/).length;
+		const charCount = content.length;
+		const previewLimit = 200;
+		const rawPreview = content.slice(0, previewLimit);
+		const preview = rawPreview.replace(/\r?\n/g, "\\n");
+		const suffix = content.length > previewLimit ? "..." : "";
 		llmSuccessMessageParts.push(
-			`User modified the \`content\` to be: ${content}`,
+			`User modified the \`content\` (chars: ${charCount}, lines: ${lineCount}). Preview: ${preview}${suffix}`,
 		);
 	}
 

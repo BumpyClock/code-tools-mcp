@@ -3,7 +3,7 @@
 - Local-only MCP server exposing core coding tools for LLMs via STDIO.
 - Tools: `list_directory`, `read_file`, `write_file`, `search_file_content`, `glob`, `replace`, `read_many_files`.
 
-Codex CLI on windows sort of sucks because it relies on writing PS / Python scripts for basic read, write, grep operations. This MCP server exposes those standard tools making Codex CLI faster on Windows. You can use it on Linux or Mac, it will work but may not be necessary.
+Codex CLI on Windows has limitations because it relies on writing PowerShell/Python scripts for basic read, write, grep operations. This MCP server exposes those standard tools making Codex CLI faster on Windows. You can use it on Linux or Mac, it will work but may not be necessary.
 
 This is without warranty, any issues or bugs should be reported to the repository but be aware of the risks and use it at your own risk.
 
@@ -73,7 +73,8 @@ Add to your Claude config JSON:
 
 - Uses STDIO transport; avoid `console.log` (stdout). Any diagnostics are written to stderr.
 - File operations are restricted to workspace roots.
-- `.geminiignore` parameters are accepted for parity but currently ignored.
+- `ripgrep` is a deprecated alias for `search_file_content`; use `search_file_content` going forward.
+- `.geminiignore` parameters are parsed for Gemini parity but not yet applied to ignore logic (kept as a no-op while we align behavior with `.gitignore` handling). Planned for the next minor release; see CHANGELOG for updates.
 
 
 ---
