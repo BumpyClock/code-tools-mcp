@@ -243,7 +243,7 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 
 	if (skippedFiles.length > 0) {
 		if (processedFilesRelativePaths.length === 0) {
-			displayMessage += `No files were read and concatenated based on the criteria.\n`;
+			displayMessage += "No files were read and concatenated based on the criteria.\n";
 		}
 		const slice = skippedFiles.slice(0, 5);
 		displayMessage += `\n**Skipped ${skippedFiles.length} item(s)${

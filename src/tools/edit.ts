@@ -63,8 +63,8 @@ function getDiffStat(
 		let removedLines = 0;
 		let addedChars = 0;
 		let removedChars = 0;
-		patch.hunks.forEach((hunk) => {
-			hunk.lines.forEach((line) => {
+		for (const hunk of patch.hunks) {
+			for (const line of hunk.lines) {
 				if (line.startsWith("+")) {
 					addedLines++;
 					addedChars += line.length - 1;
@@ -72,8 +72,8 @@ function getDiffStat(
 					removedLines++;
 					removedChars += line.length - 1;
 				}
-			});
-		});
+			}
+		}
 		return { addedLines, removedLines, addedChars, removedChars };
 	};
 
