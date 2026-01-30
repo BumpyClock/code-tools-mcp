@@ -1,0 +1,1 @@
+- 2026-01-30: Gemini CLI tool parity: Gemini-style schemas + outputs, multi-root workspace support, binary reads in read_file/read_many_files.

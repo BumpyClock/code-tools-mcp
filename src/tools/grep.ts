@@ -128,7 +128,7 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 	if (input.path) {
 		let resolved: string;
 		try {
-			resolved = resolveWithinWorkspace(path.resolve(root, input.path));
+			resolved = resolveWithinWorkspace(path.resolve(root, input.path)).absPath;
 		} catch (e: unknown) {
 			const msg = e instanceof Error ? e.message : String(e);
 			return {
@@ -151,7 +151,7 @@ export async function grepTool(input: GrepInput, signal?: AbortSignal) {
 		}
 	}
 
-	const ig = await buildIgnoreFilter();
+	const ig = await buildIgnoreFilter(undefined, root);
 	const include = input.include ?? "**/*";
 
 	// Handle exclude as string or array

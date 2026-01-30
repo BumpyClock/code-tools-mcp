@@ -1,97 +1,81 @@
 // ABOUTME: Performs fast regex searches using the ripgrep binary when available.
-// ABOUTME: Falls back to the JS grep tool and enforces workspace/safety constraints.
+// ABOUTME: Falls back to a JS search and enforces workspace/safety constraints.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { downloadRipGrep } from "@joshua.litt/get-ripgrep";
+import fg from "fast-glob";
 import { z } from "zod";
-import { ErrorCode } from "../types/error-codes.js";
+import { ToolErrorType } from "../types/tool-error-type.js";
+import { toolResultShape } from "../types/tool-result.js";
+import { buildIgnoreFilter } from "../utils/ignore.js";
 import { ensureDir, fileExists, getGlobalBinDir } from "../utils/storage.js";
 import {
-	getWorkspaceRoot,
 	isSensitivePath,
 	resolveWithinWorkspace,
 	toPosixPath,
 } from "../utils/workspace.js";
-import { type grepInput, grepTool } from "./grep.js";
 
-export const ripgrepShape = {
-	pattern: z.string().describe("Regular expression to search for."),
-	path: z
+const DEFAULT_MAX_MATCHES = 20000;
+const DEFAULT_TIMEOUT_MS = 30000;
+const DEFAULT_EXCLUDES = [
+	"**/{node_modules,.git,dist,build,out}/**",
+	"*.log",
+	"*.tmp",
+];
+
+export const searchFileContentShape = {
+	pattern: z.string().describe("The pattern to search for."),
+	dir_path: z
 		.string()
 		.optional()
-		.describe("Directory to search (relative or absolute)."),
+		.describe("Directory or file to search (defaults to '.')."),
 	include: z
-		.union([z.string(), z.array(z.string())])
+		.string()
 		.optional()
-		.describe("Glob include pattern(s), e.g. **/*.{ts,tsx}"),
-	exclude: z
-		.union([z.string(), z.array(z.string())])
-		.optional()
-		.describe("Glob exclude pattern(s), e.g. **/dist/**"),
-	ignore_case: z
+		.describe("Glob pattern to filter files (e.g., '*.ts')."),
+	case_sensitive: z
 		.boolean()
 		.optional()
-		.describe("Case-insensitive search (default true)."),
-	context_lines_before: z
+		.describe("If true, search is case-sensitive. Defaults to false."),
+	fixed_strings: z
+		.boolean()
+		.optional()
+		.describe("If true, treat pattern as a literal string."),
+	context: z
 		.number()
 		.int()
 		.min(0)
 		.optional()
-		.describe("Number of context lines before each match (-B)."),
-	context_lines_after: z
+		.describe("Show this many lines of context around each match."),
+	after: z
 		.number()
 		.int()
 		.min(0)
 		.optional()
-		.describe("Number of context lines after each match (-A)."),
-	context_lines: z
+		.describe("Show this many lines after each match."),
+	before: z
 		.number()
 		.int()
 		.min(0)
 		.optional()
-		.describe("Number of context lines before/after each match (-C)."),
-	output_mode: z
-		.enum(["full", "files_only", "count"])
+		.describe("Show this many lines before each match."),
+	no_ignore: z
+		.boolean()
 		.optional()
-		.describe("Output mode: full match objects, files only, or count."),
-	max_matches: z
-		.number()
-		.optional()
-		.describe("Maximum number of matches to return (default 20000)."),
+		.describe("If true, do not respect ignore files or defaults."),
 };
-export const ripgrepInput = z.object(ripgrepShape);
-export type RipgrepInput = z.infer<typeof ripgrepInput>;
+export const searchFileContentInput = z.object(searchFileContentShape);
+export type SearchFileContentInput = z.infer<typeof searchFileContentInput>;
 
-// Output schema for structured content returned by this tool
-export const ripgrepOutputShape = {
-	matches: z
-		.array(
-			z.object({
-				filePath: z.string(),
-				absoluteFilePath: z.string().optional(),
-				lineNumber: z.number(),
-				line: z.string(),
-				contextBefore: z
-					.array(z.object({ lineNumber: z.number(), line: z.string() }))
-					.optional(),
-				contextAfter: z
-					.array(z.object({ lineNumber: z.number(), line: z.string() }))
-					.optional(),
-			}),
-		)
-		.optional(),
-	files: z.array(z.string()).optional(),
-	count: z.number().optional(),
-	stderr: z.string().optional(),
-	summary: z.string().optional(),
-	truncated: z.boolean().optional(),
-	maxMatches: z.number().optional(),
-	aborted: z.boolean().optional(),
-	error: z.string().optional(),
-	message: z.string().optional(),
-};
+export const searchFileContentOutputShape = toolResultShape;
+
+interface GrepMatch {
+	filePath: string;
+	lineNumber: number;
+	line: string;
+}
 
 let RG_ON_PATH: boolean | null = null;
 
@@ -131,71 +115,185 @@ async function ensureLocalRg(): Promise<string | null> {
 	return (await fileExists(rgPath)) ? rgPath : null;
 }
 
-function resolveContextCounts(input: RipgrepInput): {
-	before: number;
-	after: number;
-} {
-	const c = input.context_lines ?? 0;
-	const before = input.context_lines_before ?? c;
-	const after = input.context_lines_after ?? c;
-	return { before, after };
+async function parseRipgrepJson(
+	proc: ReturnType<typeof spawn>,
+	maxMatches: number,
+	signal?: AbortSignal,
+): Promise<{ matches: GrepMatch[]; stderr: string; truncated: boolean }> {
+	const matches: GrepMatch[] = [];
+	let stderrBuf = "";
+	let truncated = false;
+	let aborted = false;
+
+	const onAbort = () => {
+		aborted = true;
+		proc.kill();
+	};
+	if (signal) {
+		if (signal.aborted) onAbort();
+		signal.addEventListener("abort", onAbort, { once: true });
+	}
+
+	let pending = "";
+	const handleLine = (line: string) => {
+		if (!line.trim()) return;
+		if (truncated || matches.length >= maxMatches) return;
+		try {
+			const json = JSON.parse(line);
+			if (json.type !== "match") return;
+			const match = json.data;
+			if (match.path?.text && match.lines?.text) {
+				matches.push({
+					filePath: match.path.text,
+					lineNumber: match.line_number,
+					line: match.lines.text.trimEnd(),
+				});
+				if (matches.length >= maxMatches) {
+					truncated = true;
+					proc.kill();
+				}
+			}
+		} catch {}
+	};
+
+	await new Promise<void>((resolve) => {
+		if (!proc.stdout || !proc.stderr) {
+			resolve();
+			return;
+		}
+		proc.stdout.setEncoding("utf8");
+		proc.stdout.on("data", (chunk: string) => {
+			pending += chunk;
+			const lines = pending.split(/\r?\n/);
+			pending = lines.pop() ?? "";
+			for (const line of lines) handleLine(line);
+		});
+		proc.stderr.on("data", (d: Buffer) => {
+			stderrBuf += d.toString();
+		});
+		proc.on("exit", () => {
+			if (pending.trim()) handleLine(pending);
+			resolve();
+		});
+		proc.on("error", () => resolve());
+	});
+
+	if (signal) signal.removeEventListener("abort", onAbort);
+	if (aborted) return { matches: [], stderr: stderrBuf, truncated };
+
+	return { matches, stderr: stderrBuf, truncated };
 }
 
-export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
-	const root = getWorkspaceRoot();
-	let baseDir = root;
-	let fileOnly: string | null = null;
-	if (input.path) {
-		let resolved: string;
-		try {
-			resolved = resolveWithinWorkspace(
-				path.isAbsolute(input.path) ? input.path : path.join(root, input.path),
-			);
-		} catch (e: unknown) {
-			const msg = e instanceof Error ? e.message : String(e);
-			return {
-				content: [{ type: "text" as const, text: msg }],
-				structuredContent: { error: ErrorCode.OUTSIDE_WORKSPACE, message: msg },
-			};
-		}
+async function fallbackSearch(
+	input: SearchFileContentInput,
+	searchPath: string,
+	maxMatches: number,
+	signal?: AbortSignal,
+	targetFile?: string,
+): Promise<GrepMatch[]> {
+	const results: GrepMatch[] = [];
+	const caseSensitive = input.case_sensitive === true;
+	const fixedStrings = input.fixed_strings === true;
+	const includePattern = input.include ?? "**/*";
+	const ignore = input.no_ignore ? [] : DEFAULT_EXCLUDES;
+	const ig = input.no_ignore
+		? null
+		: await buildIgnoreFilter({ respectGitIgnore: true }, searchPath);
 
-		const st = await fs.stat(resolved).catch(() => null);
-		if (st?.isFile()) {
-			const relFilePosix = toPosixPath(path.relative(root, resolved));
-			if (isSensitivePath(relFilePosix)) {
-				const msg = `Refusing to search sensitive file: ${relFilePosix}`;
-				return {
-					content: [{ type: "text" as const, text: msg }],
-					structuredContent: { error: ErrorCode.SENSITIVE_PATH, message: msg },
-				};
-			}
-			fileOnly = resolved;
-			baseDir = path.dirname(resolved);
-		} else if (st?.isDirectory()) {
-			baseDir = resolved;
-		} else {
-			const msg = `Path not found: ${resolved}`;
-			return {
-				content: [{ type: "text" as const, text: msg }],
-				structuredContent: { error: ErrorCode.NOT_FOUND, message: msg },
-			};
+	const entries = targetFile
+		? [targetFile]
+		: await fg(includePattern, {
+				cwd: searchPath,
+				absolute: true,
+				onlyFiles: true,
+				dot: true,
+				followSymbolicLinks: false,
+				ignore,
+			});
+
+	const pattern = fixedStrings ? input.pattern : input.pattern;
+	let regex: RegExp | null = null;
+	if (!fixedStrings) {
+		regex = new RegExp(pattern, caseSensitive ? "" : "i");
+	}
+
+	for (const absFile of entries) {
+		if (signal?.aborted) break;
+		const rel = toPosixPath(path.relative(searchPath, absFile));
+		if (isSensitivePath(rel)) continue;
+		if (ig?.ignores(rel)) continue;
+		const text = await fs.readFile(absFile, "utf8").catch(() => null);
+		if (text === null) continue;
+		const lines = text.split(/\r?\n/);
+		for (let i = 0; i < lines.length; i++) {
+			if (signal?.aborted) break;
+			const line = lines[i] ?? "";
+			const matched = fixedStrings
+				? line.includes(pattern)
+				: (regex?.test(line) ?? false);
+			if (!matched) continue;
+			results.push({ filePath: rel, lineNumber: i + 1, line: line.trimEnd() });
+			if (results.length >= maxMatches) return results;
 		}
 	}
 
-	const baseDirRelPosix = toPosixPath(path.relative(root, baseDir) || ".");
-	if (isSensitivePath(baseDirRelPosix)) {
-		const msg = `Refusing to search in sensitive path: ${baseDirRelPosix}`;
+	return results;
+}
+
+export async function searchFileContentTool(
+	input: SearchFileContentInput,
+	signal?: AbortSignal,
+) {
+	const pathParam = input.dir_path ?? ".";
+	let resolved: { absPath: string; root: string };
+	try {
+		resolved = resolveWithinWorkspace(pathParam);
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e);
 		return {
-			content: [{ type: "text" as const, text: msg }],
-			structuredContent: { error: ErrorCode.SENSITIVE_PATH, message: msg },
+			llmContent: msg,
+			returnDisplay: "Error: Path not in workspace.",
+			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
 		};
 	}
 
-	const maxMatches = input.max_matches ?? 20000;
-	const outputMode = input.output_mode ?? "full";
-	const { before: ctxBefore, after: ctxAfter } = resolveContextCounts(input);
-	const includeContext =
-		outputMode === "full" && (ctxBefore > 0 || ctxAfter > 0);
+	const searchAbs = resolved.absPath;
+	let stats: Awaited<ReturnType<typeof fs.stat>> | undefined;
+	try {
+		stats = await fs.stat(searchAbs);
+	} catch (_error: unknown) {
+		const msg = `Path does not exist: ${searchAbs}`;
+		return {
+			llmContent: msg,
+			returnDisplay: "Error: Path does not exist.",
+			error: { message: msg, type: ToolErrorType.FILE_NOT_FOUND },
+		};
+	}
+	if (!stats.isDirectory() && !stats.isFile()) {
+		return {
+			llmContent: `Path is not a valid directory or file: ${searchAbs}`,
+			returnDisplay: "Error: Path is not a valid directory or file.",
+		};
+	}
+
+	const searchDir = stats.isFile() ? path.dirname(searchAbs) : searchAbs;
+	const searchLocationDescription = `in path "${pathParam}"`;
+	const maxMatches = DEFAULT_MAX_MATCHES;
+	const timeoutController = new AbortController();
+	const timeoutId = setTimeout(
+		() => timeoutController.abort(),
+		DEFAULT_TIMEOUT_MS,
+	);
+	const combinedController = new AbortController();
+	const onAbort = () => combinedController.abort();
+	if (signal) {
+		if (signal.aborted) onAbort();
+		signal.addEventListener("abort", onAbort, { once: true });
+	}
+	timeoutController.signal.addEventListener("abort", onAbort, { once: true });
+
+	let matches: GrepMatch[] = [];
+	let wasTruncated = false;
 
 	let rgCmd: string | null = null;
 	if (await haveRgOnPath()) {
@@ -203,298 +301,113 @@ export async function ripgrepTool(input: RipgrepInput, signal?: AbortSignal) {
 	} else {
 		rgCmd = await ensureLocalRg();
 	}
-	if (!rgCmd) {
-		// Fallback to JS grep implementation
-		const includeStr = Array.isArray(input.include)
-			? `{${input.include.join(",")}}`
-			: input.include;
-		const excludeStr = Array.isArray(input.exclude)
-			? `{${input.exclude.join(",")}}`
-			: input.exclude;
-		return grepTool(
-			{
-				pattern: input.pattern,
-				path: fileOnly
-					? path.relative(root, fileOnly)
-					: path.relative(root, baseDir) || ".",
-				include: includeStr,
-				exclude: excludeStr,
-				regex: true,
-				ignore_case: input.ignore_case,
-				context_lines_before: input.context_lines_before,
-				context_lines_after: input.context_lines_after,
-				context_lines: input.context_lines,
-				output_mode: outputMode,
-				max_matches: maxMatches,
-			} as z.infer<typeof grepInput>,
-			signal,
+
+	if (rgCmd) {
+		const args: string[] = ["--json"];
+		if (!input.case_sensitive) args.push("--ignore-case");
+		if (input.fixed_strings) {
+			args.push("--fixed-strings", input.pattern);
+		} else {
+			args.push("--regexp", input.pattern);
+		}
+		if (input.context !== undefined) {
+			args.push("--context", input.context.toString());
+		}
+		if (input.after !== undefined) {
+			args.push("--after-context", input.after.toString());
+		}
+		if (input.before !== undefined) {
+			args.push("--before-context", input.before.toString());
+		}
+		if (input.no_ignore) {
+			args.push("--no-ignore");
+		}
+		if (input.include) {
+			args.push("--glob", input.include);
+		}
+		if (!input.no_ignore) {
+			for (const exclude of DEFAULT_EXCLUDES) {
+				args.push("--glob", `!${exclude}`);
+			}
+		}
+		args.push(searchAbs);
+
+		const proc = spawn(rgCmd, args, {
+			cwd: searchDir,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		const parsed = await parseRipgrepJson(
+			proc,
+			maxMatches,
+			combinedController.signal,
 		);
-	}
-
-	const args = ["--json", "--line-number"];
-
-	// Smart-case: if ignore_case is undefined, use --smart-case
-	if (input.ignore_case === undefined) {
-		args.push("--smart-case");
-	} else if (input.ignore_case !== false) {
-		args.push("--ignore-case");
-	}
-
-	// include globs
-	const includes = input.include
-		? Array.isArray(input.include)
-			? input.include
-			: [input.include]
-		: [];
-	for (const inc of includes) args.push("-g", inc);
-	// exclude globs
-	const excludes = input.exclude
-		? Array.isArray(input.exclude)
-			? input.exclude
-			: [input.exclude]
-		: [];
-	for (const exc of excludes) args.push("-g", `!${exc}`);
-	// Always exclude sensitive dirs/files from search.
-	args.push("-g", "!.git/**");
-	args.push("-g", "!.hg/**");
-	args.push("-g", "!.svn/**");
-	args.push("-g", "!.env");
-	// ripgrep respects .gitignore by default; include hidden files but still honor ignore rules
-	args.push("--hidden");
-	args.push(input.pattern);
-	args.push(fileOnly ? path.basename(fileOnly) : ".");
-
-	const proc = spawn(rgCmd, args, {
-		cwd: baseDir,
-		stdio: ["ignore", "pipe", "pipe"],
-	});
-	const matches: Array<{
-		filePath: string;
-		absoluteFilePath?: string;
-		lineNumber: number;
-		line: string;
-		contextBefore?: Array<{ lineNumber: number; line: string }>;
-		contextAfter?: Array<{ lineNumber: number; line: string }>;
-	}> = [];
-	const matchedFiles = new Set<string>();
-	let matchCount = 0;
-	let stderrBuf = "";
-	let aborted = false;
-	let truncated = false;
-
-	signal?.addEventListener("abort", () => {
-		aborted = true;
-		proc.kill();
-	});
-
-	let pending = "";
-	const handleJsonLine = (line: string) => {
-		if (!line.trim()) return;
-		// Enforce a hard total match cap; ripgrep's streaming output can emit more
-		// JSON events after the process is killed.
-		if (truncated || matchCount >= maxMatches) return;
-		try {
-			const evt = JSON.parse(line);
-			if (evt.type !== "match") return;
-			const absFile = path.resolve(baseDir, evt.data.path.text);
-			const relPosix = toPosixPath(path.relative(root, absFile));
-			if (isSensitivePath(relPosix)) return;
-
-			matchCount += 1;
-			matchedFiles.add(relPosix);
-			if (outputMode === "full") {
-				matches.push({
-					filePath: relPosix,
-					absoluteFilePath: absFile,
-					lineNumber: evt.data.line_number,
-					line: evt.data.lines.text.trimEnd(),
-				});
-			}
-			if (matchCount >= maxMatches) {
-				truncated = true;
-				proc.kill();
-			}
-		} catch {}
-	};
-
-	await new Promise<void>((resolve) => {
-		proc.stdout.setEncoding("utf8");
-		proc.stdout.on("data", (chunk: string) => {
-			pending += chunk;
-			const lines = pending.split(/\r?\n/);
-			pending = lines.pop() ?? "";
-			for (const line of lines) {
-				handleJsonLine(line);
-			}
+		matches = parsed.matches.map((match) => {
+			const absoluteFilePath = path.resolve(searchDir, match.filePath);
+			const relativeFilePath =
+				path.relative(searchDir, absoluteFilePath) ||
+				path.basename(absoluteFilePath);
+			return { ...match, filePath: relativeFilePath };
 		});
-		proc.stderr.on("data", (d: Buffer) => {
-			stderrBuf += d.toString();
+		wasTruncated = parsed.truncated || matches.length >= maxMatches;
+	} else {
+		matches = await fallbackSearch(
+			input,
+			searchDir,
+			maxMatches,
+			combinedController.signal,
+			stats.isFile() ? searchAbs : undefined,
+		);
+		wasTruncated = matches.length >= maxMatches;
+	}
+
+	clearTimeout(timeoutId);
+	if (signal) signal.removeEventListener("abort", onAbort);
+	timeoutController.signal.removeEventListener("abort", onAbort);
+
+	if (!input.no_ignore) {
+		const ig = await buildIgnoreFilter(
+			{ respectGitIgnore: true },
+			resolved.root,
+		);
+		matches = matches.filter((match) => {
+			const absFile = path.resolve(searchDir, match.filePath);
+			const relToRoot = toPosixPath(path.relative(resolved.root, absFile));
+			if (isSensitivePath(relToRoot)) return false;
+			if (ig.ignores(relToRoot)) return false;
+			return true;
 		});
-		proc.on("exit", () => {
-			if (pending.trim()) handleJsonLine(pending);
-			resolve();
-		});
-		proc.on("error", () => resolve());
-	});
-
-	if (aborted) {
-		return {
-			content: [{ type: "text" as const, text: "Search aborted." }],
-			structuredContent: { aborted: true },
-		};
 	}
 
-	if (matchCount === 0) {
-		const where = path.relative(root, baseDir) || ".";
-		const filterDesc = includes.length
-			? ` (filter: ${includes.join(", ")})`
-			: "";
-		const excludeDesc = excludes.length
-			? ` (exclude: ${excludes.join(", ")})`
-			: "";
-		const msg = `No matches for "${input.pattern}" in ${where}${filterDesc}${excludeDesc}.`;
-		return {
-			content: [{ type: "text" as const, text: msg }],
-			structuredContent: {
-				matches: outputMode === "full" ? [] : undefined,
-				files: outputMode === "files_only" ? [] : undefined,
-				count: outputMode !== "full" ? 0 : undefined,
-				stderr: stderrBuf || undefined,
-				summary: "No matches found.",
-				truncated: false,
-			},
-		};
+	if (matches.length === 0) {
+		const filterNote = input.include ? ` (filter: "${input.include}")` : "";
+		const noMatchMsg = `No matches found for pattern "${input.pattern}" ${searchLocationDescription}${filterNote}.`;
+		return { llmContent: noMatchMsg, returnDisplay: "No matches found" };
 	}
 
-	// Improved scope messaging
-	const searchScope = fileOnly
-		? `in ${toPosixPath(path.relative(root, fileOnly))}`
-		: baseDir === root
-			? "across workspace"
-			: `in ${toPosixPath(path.relative(root, baseDir))}`;
+	const matchesByFile = matches.reduce<Record<string, GrepMatch[]>>(
+		(acc, match) => {
+			if (!acc[match.filePath]) acc[match.filePath] = [];
+			acc[match.filePath].push(match);
+			acc[match.filePath].sort((a, b) => a.lineNumber - b.lineNumber);
+			return acc;
+		},
+		{},
+	);
 
-	if (outputMode === "count") {
-		const summary = truncated
-			? `Found ${matchCount} matches (limited to ${maxMatches}).`
-			: `Found ${matchCount} match${matchCount === 1 ? "" : "es"}.`;
-		return {
-			content: [{ type: "text" as const, text: summary }],
-			structuredContent: {
-				count: matchCount,
-				stderr: stderrBuf || undefined,
-				summary,
-				truncated,
-				maxMatches: truncated ? maxMatches : undefined,
-			},
-		};
-	}
+	const matchCount = matches.length;
+	const matchTerm = matchCount === 1 ? "match" : "matches";
+	let llmContent = `Found ${matchCount} ${matchTerm} for pattern "${input.pattern}" ${searchLocationDescription}${input.include ? ` (filter: "${input.include}")` : ""}${wasTruncated ? ` (results limited to ${maxMatches} matches for performance)` : ""}:\n---\n`;
 
-	if (outputMode === "files_only") {
-		const files = Array.from(matchedFiles).sort((a, b) => a.localeCompare(b));
-		const summary = truncated
-			? `Found ${files.length} file(s) with matches (limited to ${maxMatches} matches).`
-			: `Found ${files.length} file(s) with matches.`;
-		return {
-			content: [{ type: "text" as const, text: files.join("\n") }],
-			structuredContent: {
-				files,
-				count: matchCount,
-				stderr: stderrBuf || undefined,
-				summary,
-				truncated,
-				maxMatches: truncated ? maxMatches : undefined,
-			},
-		};
-	}
-
-	if (includeContext) {
-		const CONTEXT_FILE_BYTE_CAP = 2 * 1024 * 1024;
-		const matchesByAbs = new Map<string, Array<(typeof matches)[number]>>();
-		for (const m of matches) {
-			const abs = m.absoluteFilePath;
-			if (!abs) continue;
-			if (!matchesByAbs.has(abs)) matchesByAbs.set(abs, []);
-			matchesByAbs.get(abs)?.push(m);
+	for (const filePath in matchesByFile) {
+		llmContent += `File: ${filePath}\n`;
+		for (const match of matchesByFile[filePath] ?? []) {
+			llmContent += `L${match.lineNumber}: ${match.line.trim()}\n`;
 		}
-
-		for (const [abs, fileMatches] of matchesByAbs) {
-			try {
-				const st = await fs.stat(abs);
-				if (!st.isFile()) continue;
-				if (st.size > CONTEXT_FILE_BYTE_CAP) continue;
-				const text = await fs.readFile(abs, "utf8");
-				const lines = text.split(/\r?\n/);
-				for (const m of fileMatches) {
-					const lineIndex = m.lineNumber - 1;
-					if (lineIndex < 0 || lineIndex >= lines.length) continue;
-					if (ctxBefore > 0) {
-						const start = Math.max(0, lineIndex - ctxBefore);
-						if (start < lineIndex) {
-							m.contextBefore = lines
-								.slice(start, lineIndex)
-								.map((line, offset) => ({
-									lineNumber: start + offset + 1,
-									line,
-								}));
-						}
-					}
-					if (ctxAfter > 0) {
-						const endExclusive = Math.min(
-							lines.length,
-							lineIndex + 1 + ctxAfter,
-						);
-						if (lineIndex + 1 < endExclusive) {
-							m.contextAfter = lines
-								.slice(lineIndex + 1, endExclusive)
-								.map((line, offset) => ({
-									lineNumber: lineIndex + 2 + offset,
-									line,
-								}));
-						}
-					}
-				}
-			} catch {}
-		}
+		llmContent += "---\n";
 	}
-
-	const byFile = new Map<string, Array<(typeof matches)[number]>>();
-	for (const m of matches) {
-		if (!byFile.has(m.filePath)) byFile.set(m.filePath, []);
-		byFile.get(m.filePath)?.push(m);
-	}
-	for (const arr of byFile.values())
-		arr.sort((a, b) => a.lineNumber - b.lineNumber);
-
-	let text = `Found ${matches.length} matches for pattern "${input.pattern}" ${searchScope}${input.include ? ` (filter: "${input.include}")` : ""}:\n---\n`;
-	for (const [file, arr] of byFile) {
-		text += `File: ${file}\n`;
-		for (const r of arr) {
-			if (r.contextBefore?.length) {
-				for (const c of r.contextBefore)
-					text += `L${c.lineNumber}: ${c.line}\n`;
-			}
-			text += `L${r.lineNumber}: ${r.line}\n`;
-			if (r.contextAfter?.length) {
-				for (const c of r.contextAfter) text += `L${c.lineNumber}: ${c.line}\n`;
-			}
-		}
-		text += "---\n";
-	}
-	if (truncated) text += `(limited to ${maxMatches} matches)\n`;
-
-	const summary = truncated
-		? `Found ${matches.length} matches (limited to ${maxMatches}).`
-		: `Found ${matches.length} match${matches.length === 1 ? "" : "es"}.`;
 
 	return {
-		content: [{ type: "text" as const, text: text.trimEnd() }],
-		structuredContent: {
-			matches,
-			count: matchCount,
-			stderr: stderrBuf || undefined,
-			summary,
-			truncated,
-			maxMatches: truncated ? maxMatches : undefined,
-		},
+		llmContent: llmContent.trim(),
+		returnDisplay: `Found ${matchCount} ${matchTerm}${wasTruncated ? " (limited)" : ""}`,
 	};
 }

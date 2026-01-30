@@ -20,12 +20,6 @@ import {
 	globShape,
 	globTool,
 } from "./tools/glob.js";
-import {
-	type grepInput,
-	grepOutputShape,
-	grepShape,
-	grepTool,
-} from "./tools/grep.js";
 import { type lsInput, lsOutputShape, lsShape, lsTool } from "./tools/ls.js";
 import {
 	type readFileInput,
@@ -40,10 +34,10 @@ import {
 	readManyFilesTool,
 } from "./tools/read-many-files.js";
 import {
-	type ripgrepInput,
-	ripgrepOutputShape,
-	ripgrepShape,
-	ripgrepTool,
+	type searchFileContentInput,
+	searchFileContentOutputShape,
+	searchFileContentShape,
+	searchFileContentTool,
 } from "./tools/ripgrep.js";
 import {
 	type writeFileInput,
@@ -51,6 +45,55 @@ import {
 	writeFileShape,
 	writeFileTool,
 } from "./tools/write-file.js";
+import type { ToolContent, ToolError } from "./types/tool-result.js";
+
+type GeminiToolResult = {
+	llmContent?: string | ToolContent[];
+	returnDisplay?: unknown;
+	error?: ToolError;
+};
+
+type McpContent =
+	| { type: "text"; text: string }
+	| { type: "image"; data: string; mimeType: string }
+	| {
+			type: "resource";
+			resource: { uri: string; blob: string; mimeType?: string };
+	  };
+
+function toContent(llmContent?: string | ToolContent[]): McpContent[] {
+	if (!llmContent) return [];
+	if (typeof llmContent === "string") {
+		return [{ type: "text", text: llmContent }];
+	}
+	return llmContent.map((part) => {
+		if (part.type === "text") {
+			return { type: "text", text: part.text ?? "" };
+		}
+		if (part.type === "image") {
+			return {
+				type: "image",
+				data: part.data ?? "",
+				mimeType: part.mimeType ?? "application/octet-stream",
+			};
+		}
+		return {
+			type: "resource",
+			resource: {
+				uri: "inline://resource",
+				blob: part.data ?? "",
+				mimeType: part.mimeType,
+			},
+		};
+	});
+}
+
+function wrapResult(result: GeminiToolResult) {
+	return {
+		content: toContent(result.llmContent),
+		structuredContent: result,
+	};
+}
 
 function readPackageVersion(): string {
 	try {
@@ -73,11 +116,11 @@ server.registerTool(
 	"list_directory",
 	{
 		title: "List Directory",
-		description: "Non-recursive listing; dirs first; respects .gitignore.",
+		description: "Lists names of files/subdirectories in a directory.",
 		inputSchema: lsShape,
 		outputSchema: lsOutputShape,
 	},
-	async (input: z.infer<typeof lsInput>) => lsTool(input),
+	async (input: z.infer<typeof lsInput>) => wrapResult(await lsTool(input)),
 );
 
 server.registerTool(
@@ -88,79 +131,67 @@ server.registerTool(
 		inputSchema: readFileShape,
 		outputSchema: readFileOutputShape,
 	},
-	async (input: z.infer<typeof readFileInput>) => readFileTool(input),
+	async (input: z.infer<typeof readFileInput>) =>
+		wrapResult(await readFileTool(input)),
 );
 
 server.registerTool(
 	"write_file",
 	{
 		title: "Write File",
-		description:
-			"Create/overwrite file; preview with apply=false; workspace-safe.",
+		description: "Create or overwrite a file within the workspace.",
 		inputSchema: writeFileShape,
 		outputSchema: writeFileOutputShape,
 	},
-	async (input: z.infer<typeof writeFileInput>) => writeFileTool(input),
+	async (input: z.infer<typeof writeFileInput>) =>
+		wrapResult(await writeFileTool(input)),
 );
 
 server.registerTool(
-	"grep",
+	"search_file_content",
 	{
-		title: "Grep",
-		description:
-			"Text/regex search; smart-case default; skips binaries; respects .gitignore.",
-		inputSchema: grepShape,
-		outputSchema: grepOutputShape,
+		title: "Search File Content",
+		description: "FAST regex search powered by ripgrep.",
+		inputSchema: searchFileContentShape,
+		outputSchema: searchFileContentOutputShape,
 	},
-	async (input: z.infer<typeof grepInput>, { signal }) =>
-		grepTool(input, signal),
-);
-
-server.registerTool(
-	"ripgrep",
-	{
-		title: "Ripgrep",
-		description:
-			"Fast regex search via ripgrep (JS fallback); include/exclude globs; 20k cap.",
-		inputSchema: ripgrepShape,
-		outputSchema: ripgrepOutputShape,
-	},
-	async (input: z.infer<typeof ripgrepInput>, { signal }) =>
-		ripgrepTool(input, signal),
+	async (input: z.infer<typeof searchFileContentInput>, { signal }) =>
+		wrapResult(await searchFileContentTool(input, signal)),
 );
 
 server.registerTool(
 	"glob",
 	{
 		title: "Glob",
-		description: "Match files by glob; newest-first; respects .gitignore.",
+		description: "Finds files matching a glob pattern.",
 		inputSchema: globShape,
 		outputSchema: globOutputShape,
 	},
-	async (input: z.infer<typeof globInput>) => globTool(input),
+	async (input: z.infer<typeof globInput>, { signal }) =>
+		wrapResult(await globTool(input, signal)),
 );
 
 server.registerTool(
-	"edit",
+	"replace",
 	{
-		title: "Edit",
-		description: "Targeted text replace; preview (apply=false).",
+		title: "Replace",
+		description: "Replace text within a file.",
 		inputSchema: editShape,
 		outputSchema: editOutputShape,
 	},
-	async (input: z.infer<typeof editInput>) => editTool(input),
+	async (input: z.infer<typeof editInput>) => wrapResult(await editTool(input)),
 );
 
 server.registerTool(
 	"read_many_files",
 	{
 		title: "Read Many Files",
-		description:
-			"Read many files by glob; concatenated; skips binaries; 2MB cap.",
+		description: "Read and concatenate content from multiple files.",
 		inputSchema: readManyFilesShape,
 		outputSchema: readManyFilesOutputShape,
 	},
-	async (input: z.infer<typeof readManyFilesInput>) => readManyFilesTool(input),
+	async (input: z.infer<typeof readManyFilesInput>) =>
+		wrapResult(await readManyFilesTool(input)),
 );
 
 // Start with stdio transport for local-only use

@@ -1,242 +1,292 @@
-// ABOUTME: Reads multiple text files in the workspace and concatenates results.
-// ABOUTME: Applies ignore rules, safety checks, and output size caps.
+// ABOUTME: Reads multiple files and concatenates content with separators.
+// ABOUTME: Supports explicit binary inclusion for images/audio/PDF.
 
 import fs from "node:fs/promises";
 import path from "node:path";
 import fg from "fast-glob";
 import { isText } from "istextorbinary";
+import mime from "mime-types";
 import { z } from "zod";
+import { type ToolContent, toolResultShape } from "../types/tool-result.js";
 import { buildIgnoreFilter } from "../utils/ignore.js";
 import {
-	getWorkspaceRoot,
+	getPrimaryWorkspaceRoot,
+	getWorkspaceRoots,
 	isSensitivePath,
+	relativize,
+	relativizePosix,
 	resolveWithinWorkspace,
-	toPosixPath,
 } from "../utils/workspace.js";
 
 export const readManyFilesShape = {
-	paths: z
-		.array(z.string())
-		.describe("Array of file or directory globs relative to workspace."),
 	include: z
 		.array(z.string())
+		.min(1)
+		.describe("Glob patterns or paths to include."),
+	exclude: z
+		.array(z.string())
 		.optional()
-		.describe("Additional glob patterns to include."),
-	exclude: z.array(z.string()).optional().describe("Glob patterns to exclude."),
+		.describe("Optional glob patterns to exclude."),
+	recursive: z
+		.boolean()
+		.optional()
+		.describe("Optional: whether to search recursively. Defaults to true."),
 	useDefaultExcludes: z
 		.boolean()
 		.optional()
-		.describe(
-			"Apply default excludes (node_modules, dist, .git, etc.). Default true.",
-		),
+		.describe("Optional: apply default exclusion patterns. Defaults to true."),
 	file_filtering_options: z
-		.object({ respect_git_ignore: z.boolean().optional() })
+		.object({
+			respect_git_ignore: z.boolean().optional(),
+			respect_gemini_ignore: z.boolean().optional(),
+		})
 		.optional(),
 };
 export const readManyFilesInput = z.object(readManyFilesShape);
 export type ReadManyFilesInput = z.infer<typeof readManyFilesInput>;
 
-// Output schema for structured content returned by this tool
-export const readManyFilesOutputShape = {
-	files: z.array(z.string()),
-	relativeFiles: z.array(z.string()).optional(),
-	fileStats: z
-		.array(z.object({ path: z.string(), lines: z.number(), bytes: z.number() }))
-		.optional(),
-	skipped: z.array(z.object({ path: z.string(), reason: z.string() })),
-	skipCounts: z
-		.object({
-			ignored: z.number().optional(),
-			sensitive: z.number().optional(),
-			binary: z.number().optional(),
-			tooLarge: z.number().optional(),
-			notFile: z.number().optional(),
-			totalCapReached: z.number().optional(),
-			readError: z.number().optional(),
-		})
-		.optional(),
-	totalBytes: z.number(),
-	text: z.string().optional(),
-	truncated: z.boolean().optional(),
-	totalCapReached: z.boolean().optional(),
-	summary: z.string(),
-};
+export const readManyFilesOutputShape = toolResultShape;
 
-const DEFAULT_EXCLUDES = ["**/{node_modules,.git,dist,build,out}/**"];
-const SEP_FORMAT = "--- {filePath} ---";
-const TERMINATOR = "\n--- End of content ---";
-const TOTAL_BYTE_CAP = 2 * 1024 * 1024; // 2MB total output cap
+const DEFAULT_EXCLUDES = [
+	"**/{node_modules,.git,dist,build,out}/**",
+	"**/*.log",
+	"**/*.tmp",
+];
+const DEFAULT_OUTPUT_SEPARATOR_FORMAT = "--- {filePath} ---";
+const DEFAULT_OUTPUT_TERMINATOR = "\n--- End of content ---";
+const TOTAL_BYTE_CAP = 2 * 1024 * 1024;
+const MAX_BINARY_BYTES = 5 * 1024 * 1024;
+
+const IMAGE_EXTS = new Set([
+	".png",
+	".jpg",
+	".jpeg",
+	".gif",
+	".webp",
+	".svg",
+	".bmp",
+]);
+const AUDIO_EXTS = new Set([".mp3", ".wav", ".aiff", ".aac", ".ogg", ".flac"]);
+const PDF_EXTS = new Set([".pdf"]);
+
+function getMimeType(abs: string): string {
+	const ext = path.extname(abs).toLowerCase();
+	if (ext === ".ts" || ext === ".tsx") return "text/typescript";
+	return (mime.lookup(abs) || "text/plain").toString();
+}
+
+function isSupportedBinary(ext: string): boolean {
+	return IMAGE_EXTS.has(ext) || AUDIO_EXTS.has(ext) || PDF_EXTS.has(ext);
+}
+
+function mapBinaryPart(mimeType: string, data: string): ToolContent {
+	if (mimeType.startsWith("image/")) {
+		return { type: "image", data, mimeType };
+	}
+	return { type: "resource", data, mimeType };
+}
+
+function isExplicitBinaryRequest(patterns: string[], ext: string): boolean {
+	const lowerExt = ext.toLowerCase();
+	return patterns.some((pattern) => pattern.toLowerCase().includes(lowerExt));
+}
+
+async function globWithinRoot(
+	root: string,
+	include: string[],
+	exclude: string[],
+): Promise<string[]> {
+	const entries = new Set<string>();
+	for (const pattern of include) {
+		const normalized = pattern.replace(/\\/g, "/");
+		const fullPath = path.join(root, normalized);
+		let effective = normalized;
+		try {
+			await fs.access(fullPath);
+			effective = fg.escapePath(normalized);
+		} catch {
+			effective = normalized;
+		}
+		const matches = await fg(effective, {
+			cwd: root,
+			ignore: exclude,
+			onlyFiles: true,
+			dot: true,
+			absolute: true,
+			followSymbolicLinks: false,
+		});
+		for (const match of matches) entries.add(match);
+	}
+	return Array.from(entries);
+}
 
 export async function readManyFilesTool(input: ReadManyFilesInput) {
-	const root = getWorkspaceRoot();
-	const searchPatterns = [...input.paths, ...(input.include ?? [])];
-	const excludes = [
-		...(input.useDefaultExcludes === false ? [] : DEFAULT_EXCLUDES),
-		...(input.exclude ?? []),
-	];
-	const ig = await buildIgnoreFilter({
-		respectGitIgnore: input.file_filtering_options?.respect_git_ignore ?? true,
-	});
+	const primaryRoot = getPrimaryWorkspaceRoot();
+	const roots = getWorkspaceRoots();
+	const include = input.include;
+	const exclude = input.exclude ?? [];
+	const useDefaultExcludes = input.useDefaultExcludes !== false;
+	const respectGit = input.file_filtering_options?.respect_git_ignore ?? true;
 
-	const files = new Set<string>();
-	for (const pattern of searchPatterns) {
-		const absMatches = await fg(pattern, {
-			cwd: root,
-			absolute: true,
-			dot: true,
-			onlyFiles: true,
-			followSymbolicLinks: false,
-			ignore: excludes,
-		});
-		for (const p of absMatches) {
-			// Belt-and-suspenders: re-check workspace containment for each resolved path
-			try {
-				resolveWithinWorkspace(p);
-				files.add(p);
-			} catch {
-				// Path is outside workspace, skip it
-			}
+	const effectiveExcludes = useDefaultExcludes
+		? [...DEFAULT_EXCLUDES, ...exclude]
+		: [...exclude];
+
+	const filesToConsider = new Set<string>();
+	for (const root of roots) {
+		const matches = await globWithinRoot(root, include, effectiveExcludes);
+		for (const match of matches) {
+			filesToConsider.add(match);
 		}
 	}
-	const filesArr = Array.from(files).sort((a, b) =>
-		path.relative(root, a).localeCompare(path.relative(root, b)),
-	);
-	if (filesArr.length === 0) {
+
+	if (filesToConsider.size === 0) {
 		return {
-			content: [{ type: "text" as const, text: "No files matched." }],
-			structuredContent: {
-				files: [],
-				relativeFiles: [],
-				fileStats: [],
-				skipped: [],
-				skipCounts: {
-					ignored: 0,
-					sensitive: 0,
-					binary: 0,
-					tooLarge: 0,
-					notFile: 0,
-					totalCapReached: 0,
-					readError: 0,
-				},
-				totalBytes: 0,
-				text: "",
-				truncated: false,
-				totalCapReached: false,
-				summary: "No files matched.",
-			},
+			llmContent:
+				"No files matching the criteria were found or all were skipped.",
+			returnDisplay: "No files were read.",
 		};
 	}
 
+	const processedFilesRelativePaths: string[] = [];
+	const skippedFiles: Array<{ path: string; reason: string }> = [];
+	const contentParts: ToolContent[] = [];
 	let totalBytes = 0;
-	let output = "";
-	const included: string[] = [];
-	const includedRel: string[] = [];
-	const fileStats: Array<{ path: string; lines: number; bytes: number }> = [];
-	const skipped: Array<{ path: string; reason: string }> = [];
+	const ignoreCache = new Map<
+		string,
+		Awaited<ReturnType<typeof buildIgnoreFilter>>
+	>();
 
-	// Track skip reasons for aggregation
-	const skipCounts = {
-		ignored: 0,
-		sensitive: 0,
-		binary: 0,
-		tooLarge: 0,
-		notFile: 0,
-		totalCapReached: 0,
-		readError: 0,
-	};
-	let totalCapReached = false;
-
-	for (const abs of filesArr) {
-		const relPosix = toPosixPath(path.relative(root, abs));
-		if (isSensitivePath(relPosix)) {
-			skipped.push({ path: abs, reason: "sensitive" });
-			skipCounts.sensitive++;
-			continue;
-		}
-		if (ig.ignores(relPosix)) {
-			skipped.push({ path: abs, reason: "ignored" });
-			skipCounts.ignored++;
-			continue;
-		}
+	for (const abs of Array.from(filesToConsider)) {
+		let resolvedRoot = primaryRoot;
 		try {
-			const st = await fs.stat(abs);
-			if (!st.isFile()) {
-				skipped.push({ path: abs, reason: "not a file" });
-				skipCounts.notFile++;
+			resolvedRoot = resolveWithinWorkspace(abs).root;
+		} catch {
+			continue;
+		}
+		const relPosix = relativizePosix(abs, resolvedRoot);
+		if (isSensitivePath(relPosix)) {
+			skippedFiles.push({ path: relPosix, reason: "sensitive" });
+			continue;
+		}
+		if (respectGit) {
+			let ig = ignoreCache.get(resolvedRoot);
+			if (!ig) {
+				ig = await buildIgnoreFilter({ respectGitIgnore: true }, resolvedRoot);
+				ignoreCache.set(resolvedRoot, ig);
+			}
+			if (ig.ignores(relPosix)) {
+				skippedFiles.push({ path: relPosix, reason: "ignored" });
 				continue;
 			}
-			// small cap per file to avoid huge binaries
-			if (st.size > 1024 * 1024) {
-				skipped.push({ path: abs, reason: "too large" });
-				skipCounts.tooLarge++;
+		}
+
+		let st: Awaited<ReturnType<typeof fs.stat>> | undefined;
+		try {
+			st = await fs.stat(abs);
+		} catch {
+			skippedFiles.push({ path: relPosix, reason: "read error" });
+			continue;
+		}
+		if (!st.isFile()) {
+			skippedFiles.push({ path: relPosix, reason: "not a file" });
+			continue;
+		}
+
+		const ext = path.extname(abs).toLowerCase();
+		const mimeType = getMimeType(abs);
+		const isBinary = isSupportedBinary(ext);
+
+		if (isBinary) {
+			if (!isExplicitBinaryRequest(include, ext)) {
+				skippedFiles.push({ path: relPosix, reason: "binary" });
+				continue;
+			}
+			if (st.size > MAX_BINARY_BYTES) {
+				skippedFiles.push({ path: relPosix, reason: "too large" });
 				continue;
 			}
 			const buf = await fs.readFile(abs);
-			if (!isText(null, buf)) {
-				skipped.push({ path: abs, reason: "binary" });
-				skipCounts.binary++;
-				continue;
+			contentParts.push(mapBinaryPart(mimeType, buf.toString("base64")));
+			processedFilesRelativePaths.push(relativize(abs, primaryRoot));
+			continue;
+		}
+
+		if (st.size > 1024 * 1024) {
+			skippedFiles.push({ path: relPosix, reason: "too large" });
+			continue;
+		}
+
+		let buf: Buffer;
+		try {
+			buf = await fs.readFile(abs);
+		} catch {
+			skippedFiles.push({ path: relPosix, reason: "read error" });
+			continue;
+		}
+		if (!isText(null, buf)) {
+			skippedFiles.push({ path: relPosix, reason: "binary" });
+			continue;
+		}
+
+		const text = buf.toString("utf8");
+		const separator = DEFAULT_OUTPUT_SEPARATOR_FORMAT.replace(
+			"{filePath}",
+			path.relative(primaryRoot, abs),
+		);
+		const chunk = `${separator}\n\n${text}\n\n`;
+		const projected = totalBytes + Buffer.byteLength(chunk, "utf8");
+		if (projected > TOTAL_BYTE_CAP) {
+			skippedFiles.push({ path: relPosix, reason: "total cap reached" });
+			break;
+		}
+		contentParts.push({ type: "text", text: chunk });
+		totalBytes = projected;
+		processedFilesRelativePaths.push(relativize(abs, primaryRoot));
+	}
+
+	let displayMessage = `### ReadManyFiles Result (Target Dir: \`${primaryRoot}\`)\n\n`;
+	if (processedFilesRelativePaths.length > 0) {
+		displayMessage += `Successfully read and concatenated content from **${processedFilesRelativePaths.length} file(s)**.\n`;
+		const slice = processedFilesRelativePaths.slice(0, 10);
+		if (slice.length > 0) {
+			displayMessage += `\n**Processed Files${processedFilesRelativePaths.length > 10 ? " (first 10 shown)" : ""}:**\n`;
+			for (const p of slice) {
+				displayMessage += `- \`${p}\`\n`;
 			}
-			const sep = SEP_FORMAT.replace("{filePath}", path.relative(root, abs));
-			const text = buf.toString("utf8");
-			const chunk = `${sep}\n${text}\n`;
-			const projected = totalBytes + Buffer.byteLength(chunk, "utf8");
-			if (projected > TOTAL_BYTE_CAP) {
-				skipped.push({ path: abs, reason: "total cap reached" });
-				skipCounts.totalCapReached++;
-				totalCapReached = true;
-				break;
+			if (processedFilesRelativePaths.length > 10) {
+				displayMessage += `- ...and ${processedFilesRelativePaths.length - 10} more.\n`;
 			}
-			output += chunk;
-			totalBytes = projected;
-			included.push(abs);
-			includedRel.push(relPosix);
-			fileStats.push({
-				path: abs,
-				lines: text.length === 0 ? 0 : text.split(/\r?\n/).length,
-				bytes: buf.byteLength,
-			});
-		} catch (_e) {
-			skipped.push({ path: abs, reason: "read error" });
-			skipCounts.readError++;
 		}
 	}
 
-	output += TERMINATOR;
+	if (skippedFiles.length > 0) {
+		if (processedFilesRelativePaths.length === 0) {
+			displayMessage += `No files were read and concatenated based on the criteria.\n`;
+		}
+		const slice = skippedFiles.slice(0, 5);
+		displayMessage += `\n**Skipped ${skippedFiles.length} item(s)${
+			skippedFiles.length > 5 ? " (first 5 shown)" : ""
+		}:**\n`;
+		for (const f of slice) {
+			displayMessage += `- \`${f.path}\` (Reason: ${f.reason})\n`;
+		}
+		if (skippedFiles.length > 5) {
+			displayMessage += `- ...and ${skippedFiles.length - 5} more.\n`;
+		}
+	}
 
-	// Build aggregated summary
-	const summaryParts = [`Read ${included.length} file(s).`];
-	if (skipped.length > 0) {
-		const skipSummary: string[] = [];
-		if (skipCounts.ignored > 0)
-			skipSummary.push(`${skipCounts.ignored} ignored`);
-		if (skipCounts.sensitive > 0)
-			skipSummary.push(`${skipCounts.sensitive} sensitive`);
-		if (skipCounts.binary > 0) skipSummary.push(`${skipCounts.binary} binary`);
-		if (skipCounts.tooLarge > 0)
-			skipSummary.push(`${skipCounts.tooLarge} too large`);
-		if (skipCounts.notFile > 0)
-			skipSummary.push(`${skipCounts.notFile} not a file`);
-		if (skipCounts.totalCapReached > 0)
-			skipSummary.push(`${skipCounts.totalCapReached} total cap reached`);
-		if (skipCounts.readError > 0)
-			skipSummary.push(`${skipCounts.readError} read errors`);
-		summaryParts.push(`Skipped ${skipped.length}: ${skipSummary.join(", ")}`);
+	if (contentParts.length > 0) {
+		contentParts.push({ type: "text", text: DEFAULT_OUTPUT_TERMINATOR });
+	} else {
+		contentParts.push({
+			type: "text",
+			text: "No files matching the criteria were found or all were skipped.",
+		});
 	}
 
 	return {
-		content: [{ type: "text" as const, text: output }],
-		structuredContent: {
-			files: included,
-			relativeFiles: includedRel,
-			fileStats,
-			skipped,
-			skipCounts,
-			totalBytes,
-			text: output,
-			truncated: totalCapReached,
-			totalCapReached,
-			summary: summaryParts.join(" "),
-		},
+		llmContent: contentParts,
+		returnDisplay: displayMessage.trim(),
 	};
 }

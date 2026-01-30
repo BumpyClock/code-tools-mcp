@@ -1,11 +1,14 @@
-// ABOUTME: Computes the workspace root and safely resolves paths within it.
+// ABOUTME: Computes workspace roots and safely resolves paths within them.
 // ABOUTME: Prevents path traversal and symlink escapes for all file tools.
 
 import fs from "node:fs";
 import path from "node:path";
+import { WorkspaceContext } from "./workspace-context.js";
 
 let WORKSPACE_ROOT: string | null = null;
-let WORKSPACE_ROOT_REAL: string | null = null;
+let WORKSPACE_ROOTS: string[] | null = null;
+let WORKSPACE_ROOTS_REAL: Map<string, string> | null = null;
+let WORKSPACE_CONTEXT: WorkspaceContext | null = null;
 
 function parseRootArg(argv: string[]): string | null {
 	for (let i = 0; i < argv.length; i++) {
@@ -21,6 +24,28 @@ function parseRootArg(argv: string[]): string | null {
 	return null;
 }
 
+function splitRoots(value: string | undefined | null): string[] {
+	if (!value) return [];
+	return value
+		.split(path.delimiter)
+		.map((entry) => entry.trim())
+		.filter(Boolean);
+}
+
+function parseRootsArg(argv: string[]): string[] {
+	for (let i = 0; i < argv.length; i++) {
+		const a = argv[i];
+		if (a === "--roots") {
+			const v = argv[i + 1];
+			return splitRoots(v);
+		}
+		if (a.startsWith("--roots=")) {
+			return splitRoots(a.slice("--roots=".length));
+		}
+	}
+	return [];
+}
+
 function findGitRoot(start: string): string | null {
 	let dir = path.resolve(start);
 	while (true) {
@@ -33,45 +58,97 @@ function findGitRoot(start: string): string | null {
 	return null;
 }
 
-function initWorkspaceRoot(): string {
-	// 1) explicit env override
+function initPrimaryRoot(): string {
 	const envRoot = process.env.CODE_TOOLS_MCP_ROOT;
 	if (envRoot) return path.resolve(envRoot);
-	// 2) CLI flag --root or -r
 	const argRoot = parseRootArg(process.argv.slice(2));
 	if (argRoot) return path.resolve(argRoot);
-	// 3) Git repo root from cwd if available
 	const gitRoot = findGitRoot(process.cwd());
 	if (gitRoot) return gitRoot;
-	// 4) fallback to cwd
 	return path.resolve(process.cwd());
 }
 
-// Determines and caches the workspace root for all file operations
+function initWorkspaceRoots(): string[] {
+	const primary = initPrimaryRoot();
+	const envRoots = splitRoots(process.env.CODE_TOOLS_MCP_ROOTS);
+	const argRoots = parseRootsArg(process.argv.slice(2));
+	const extras = [...envRoots, ...argRoots]
+		.map((entry) => path.resolve(entry))
+		.filter((entry) => entry !== primary);
+	const roots = [primary, ...extras];
+	const unique = Array.from(new Set(roots));
+	return unique;
+}
+
+function initWorkspaceContext(): WorkspaceContext {
+	const roots = getWorkspaceRoots();
+	const primary = roots[0];
+	const extras = roots.slice(1);
+	return new WorkspaceContext(primary, extras);
+}
+
 export function getWorkspaceRoot(): string {
+	return getPrimaryWorkspaceRoot();
+}
+
+export function getPrimaryWorkspaceRoot(): string {
 	if (!WORKSPACE_ROOT) {
-		WORKSPACE_ROOT = initWorkspaceRoot();
-		WORKSPACE_ROOT_REAL = null;
+		const roots = initWorkspaceRoots();
+		WORKSPACE_ROOT = roots[0];
+		WORKSPACE_ROOTS = roots;
+		WORKSPACE_ROOTS_REAL = null;
+		WORKSPACE_CONTEXT = null;
 	}
 	return WORKSPACE_ROOT;
 }
 
-function getWorkspaceRootReal(): string {
-	const root = getWorkspaceRoot();
-	if (!WORKSPACE_ROOT_REAL) {
-		try {
-			WORKSPACE_ROOT_REAL = fs.realpathSync(root);
-		} catch {
-			WORKSPACE_ROOT_REAL = root;
-		}
+export function getWorkspaceRoots(): readonly string[] {
+	if (!WORKSPACE_ROOTS) {
+		const roots = initWorkspaceRoots();
+		WORKSPACE_ROOTS = roots;
+		WORKSPACE_ROOT = roots[0];
+		WORKSPACE_ROOTS_REAL = null;
+		WORKSPACE_CONTEXT = null;
 	}
-	return WORKSPACE_ROOT_REAL;
+	return WORKSPACE_ROOTS;
 }
 
-// Optional programmatic override
+export function getWorkspaceContext(): WorkspaceContext {
+	if (!WORKSPACE_CONTEXT) {
+		WORKSPACE_CONTEXT = initWorkspaceContext();
+	}
+	return WORKSPACE_CONTEXT;
+}
+
+function getRootReal(root: string): string {
+	if (!WORKSPACE_ROOTS_REAL) {
+		WORKSPACE_ROOTS_REAL = new Map();
+	}
+	const existing = WORKSPACE_ROOTS_REAL.get(root);
+	if (existing) return existing;
+	let real = root;
+	try {
+		real = fs.realpathSync(root);
+	} catch {
+		real = root;
+	}
+	WORKSPACE_ROOTS_REAL.set(root, real);
+	return real;
+}
+
 export function setWorkspaceRoot(root: string) {
 	WORKSPACE_ROOT = path.resolve(root);
-	WORKSPACE_ROOT_REAL = null;
+	WORKSPACE_ROOTS = [WORKSPACE_ROOT];
+	WORKSPACE_ROOTS_REAL = null;
+	WORKSPACE_CONTEXT = null;
+}
+
+export function setWorkspaceRoots(roots: readonly string[]) {
+	if (roots.length === 0) return;
+	WORKSPACE_ROOTS = roots.map((entry) => path.resolve(entry));
+	WORKSPACE_ROOT = WORKSPACE_ROOTS[0];
+	WORKSPACE_ROOTS_REAL = null;
+	WORKSPACE_CONTEXT = null;
 }
 
 function findNearestExistingAncestor(p: string): string {
@@ -84,28 +161,20 @@ function findNearestExistingAncestor(p: string): string {
 	}
 }
 
-export function resolveWithinWorkspace(p: string): string {
-	const root = getWorkspaceRoot();
-	const abs = path.isAbsolute(p) ? p : path.resolve(root, p);
-	const norm = path.normalize(abs);
-	const rootWithSep = path.normalize(root + path.sep);
-
-	// On Windows, filesystems are typically case-insensitive. Normalize case
-	// to prevent false rejections for paths that differ only by letter casing.
+function isWithinRoot(absPath: string, root: string): boolean {
+	const norm = path.normalize(absPath);
+	const rootNorm = path.normalize(root);
+	const rootWithSep = path.normalize(rootNorm + path.sep);
 	const isWin = process.platform === "win32";
 	const normCmp = isWin ? norm.toLowerCase() : norm;
+	const rootCmp = isWin ? rootNorm.toLowerCase() : rootNorm;
 	const rootWithSepCmp = isWin ? rootWithSep.toLowerCase() : rootWithSep;
-	const rootCmp = isWin
-		? path.normalize(root).toLowerCase()
-		: path.normalize(root);
 
 	if (!normCmp.startsWith(rootWithSepCmp) && normCmp !== rootCmp) {
-		throw new Error(`Path is outside workspace root: ${p}`);
+		return false;
 	}
 
-	// Symlink safety: ensure the real path of the nearest existing ancestor
-	// remains within the workspace root's real path.
-	const rootReal = getWorkspaceRootReal();
+	const rootReal = getRootReal(root);
 	const rootRealNorm = path.normalize(rootReal);
 	const rootRealWithSep = path.normalize(rootRealNorm + path.sep);
 	const rootRealCmp = isWin ? rootRealNorm.toLowerCase() : rootRealNorm;
@@ -123,26 +192,40 @@ export function resolveWithinWorkspace(p: string): string {
 		? existingRealNorm.toLowerCase()
 		: existingRealNorm;
 
-	if (
-		!existingRealCmp.startsWith(rootRealWithSepCmp) &&
-		existingRealCmp !== rootRealCmp
-	) {
-		throw new Error(`Path resolves outside workspace root: ${p}`);
-	}
-	return norm;
+	return (
+		existingRealCmp.startsWith(rootRealWithSepCmp) ||
+		existingRealCmp === rootRealCmp
+	);
 }
 
-export function relativize(p: string): string {
-	const root = getWorkspaceRoot();
-	return path.relative(root, p) || ".";
+export function resolveWithinWorkspace(p: string): {
+	absPath: string;
+	root: string;
+} {
+	const roots = getWorkspaceRoots();
+	const primary = getPrimaryWorkspaceRoot();
+	const abs = path.isAbsolute(p) ? p : path.resolve(primary, p);
+	const norm = path.normalize(abs);
+
+	for (const root of roots) {
+		if (isWithinRoot(norm, root)) {
+			return { absPath: norm, root };
+		}
+	}
+	throw new Error(`Path is outside workspace roots: ${p}`);
+}
+
+export function relativize(p: string, root?: string): string {
+	const base = root ?? getPrimaryWorkspaceRoot();
+	return path.relative(base, p) || ".";
 }
 
 export function toPosixPath(p: string): string {
 	return p.split(path.sep).join("/");
 }
 
-export function relativizePosix(p: string): string {
-	return toPosixPath(relativize(p));
+export function relativizePosix(p: string, root?: string): string {
+	return toPosixPath(relativize(p, root));
 }
 
 export function isSensitivePath(relPosix: string): boolean {

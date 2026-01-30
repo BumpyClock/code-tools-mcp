@@ -6,7 +6,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import fg from "fast-glob";
 import ignore, { type Ignore } from "ignore";
-import { getWorkspaceRoot } from "./workspace.js";
+import { getPrimaryWorkspaceRoot } from "./workspace.js";
 
 export interface FilteringOptions {
 	respectGitIgnore?: boolean;
@@ -14,7 +14,7 @@ export interface FilteringOptions {
 
 const DEFAULT_IGNORE_EXCLUDES = ["**/{node_modules,.git,dist,build,out}/**"];
 
-let IGNORE_CACHE: { root: string; key: string; filter: Ignore } | null = null;
+let IGNORE_CACHE: Map<string, { key: string; filter: Ignore }> | null = null;
 
 let GLOBAL_IGNORE_FILES: string[] | null = null;
 
@@ -154,19 +154,19 @@ async function addGitIgnoreFile(ig: Ignore, root: string, absPath: string) {
 
 export async function buildIgnoreFilter(
 	options?: FilteringOptions,
+	rootOverride?: string,
 ): Promise<Ignore> {
 	const ig = ignore();
-	const root = getWorkspaceRoot();
+	const root = rootOverride ?? getPrimaryWorkspaceRoot();
 
 	if (options?.respectGitIgnore !== false) {
 		const files = await listIgnoreFiles(root);
 		const key = await computeIgnoreKey(files);
-		if (
-			IGNORE_CACHE &&
-			IGNORE_CACHE.root === root &&
-			IGNORE_CACHE.key === key
-		) {
-			return IGNORE_CACHE.filter;
+		if (IGNORE_CACHE) {
+			const cached = IGNORE_CACHE.get(root);
+			if (cached && cached.key === key) {
+				return cached.filter;
+			}
 		}
 
 		for (const file of files) {
@@ -175,7 +175,10 @@ export async function buildIgnoreFilter(
 			} catch {}
 		}
 
-		IGNORE_CACHE = { root, key, filter: ig };
+		if (!IGNORE_CACHE) {
+			IGNORE_CACHE = new Map();
+		}
+		IGNORE_CACHE.set(root, { key, filter: ig });
 	}
 
 	return ig;

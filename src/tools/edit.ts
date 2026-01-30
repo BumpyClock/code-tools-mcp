@@ -1,15 +1,14 @@
-// ABOUTME: Applies a targeted string replacement to a workspace file.
-// ABOUTME: Supports preview diffs, enforces ignore/safety, and preserves line endings.
+// ABOUTME: Replaces text within a file using exact literal matching.
+// ABOUTME: Returns a diff-like display object in Gemini CLI style.
 
 import fs from "node:fs/promises";
 import path from "node:path";
 import * as Diff from "diff";
 import { z } from "zod";
-import { ErrorCode } from "../types/error-codes.js";
-import { buildIgnoreFilter } from "../utils/ignore.js";
+import { ToolErrorType } from "../types/tool-error-type.js";
+import { toolResultShape } from "../types/tool-result.js";
 import {
 	isSensitivePath,
-	relativize,
 	relativizePosix,
 	resolveWithinWorkspace,
 } from "../utils/workspace.js";
@@ -18,105 +17,137 @@ export const editShape = {
 	file_path: z
 		.string()
 		.describe(
-			"Absolute path within the workspace, or a path relative to workspace root.",
+			"The path to the file to modify (absolute or workspace-relative).",
 		),
-	old_string: z
+	instruction: z
 		.string()
-		.describe("Text to replace. Use empty string to create a new file."),
-	new_string: z.string().describe("Replacement text."),
+		.optional()
+		.describe("A clear, semantic instruction for the code change."),
+	old_string: z.string().describe("The exact literal text to replace."),
+	new_string: z
+		.string()
+		.describe("The exact literal text to replace old_string with."),
 	expected_replacements: z
 		.number()
 		.int()
 		.min(1)
 		.optional()
-		.describe("Expected number of replacements (default 1)."),
-	replace_all: z
-		.boolean()
-		.optional()
-		.describe(
-			"Replace all occurrences without requiring expected_replacements. If expected_replacements is provided, it is still validated.",
-		),
-	apply: z
-		.boolean()
-		.default(false)
-		.describe("If false (default), return diff preview without writing."),
-	allow_ignored: z
-		.boolean()
-		.optional()
-		.describe(
-			"Optional: allow editing files ignored by .gitignore (default false).",
-		),
+		.describe("Number of replacements expected."),
 	modified_by_user: z.boolean().optional(),
 	ai_proposed_content: z.string().optional(),
 };
 export const editInput = z.object(editShape);
 export type EditInput = z.infer<typeof editInput>;
 
-// Output schema for structured content returned by this tool
-export const editOutputShape = {
-	path: z.string().optional(),
-	relativePath: z.string().optional(),
-	applied: z.boolean().optional(),
-	diff: z.string().optional(),
-	occurrences: z.number().optional(),
-	affectedLines: z.array(z.number()).optional(),
-	totalLinesAffected: z.number().optional(),
-	summary: z.string().optional(),
-	error: z.string().optional(),
-	message: z.string().optional(),
-};
+export const editOutputShape = toolResultShape;
+
+interface DiffStat {
+	model_added_lines: number;
+	model_removed_lines: number;
+	model_added_chars: number;
+	model_removed_chars: number;
+	user_added_lines: number;
+	user_removed_lines: number;
+	user_added_chars: number;
+	user_removed_chars: number;
+}
+
+function getDiffStat(
+	fileName: string,
+	oldStr: string,
+	aiStr: string,
+	userStr: string,
+): DiffStat {
+	const getStats = (patch: Diff.StructuredPatch) => {
+		let addedLines = 0;
+		let removedLines = 0;
+		let addedChars = 0;
+		let removedChars = 0;
+		patch.hunks.forEach((hunk) => {
+			hunk.lines.forEach((line) => {
+				if (line.startsWith("+")) {
+					addedLines++;
+					addedChars += line.length - 1;
+				} else if (line.startsWith("-")) {
+					removedLines++;
+					removedChars += line.length - 1;
+				}
+			});
+		});
+		return { addedLines, removedLines, addedChars, removedChars };
+	};
+
+	const modelPatch = Diff.structuredPatch(
+		fileName,
+		fileName,
+		oldStr,
+		aiStr,
+		"Current",
+		"Proposed",
+		{ context: 3, ignoreWhitespace: false },
+	);
+	const modelStats = getStats(modelPatch);
+
+	const userPatch = Diff.structuredPatch(
+		fileName,
+		fileName,
+		aiStr,
+		userStr,
+		"Proposed",
+		"User",
+		{ context: 3, ignoreWhitespace: false },
+	);
+	const userStats = getStats(userPatch);
+
+	return {
+		model_added_lines: modelStats.addedLines,
+		model_removed_lines: modelStats.removedLines,
+		model_added_chars: modelStats.addedChars,
+		model_removed_chars: modelStats.removedChars,
+		user_added_lines: userStats.addedLines,
+		user_removed_lines: userStats.removedLines,
+		user_added_chars: userStats.addedChars,
+		user_removed_chars: userStats.removedChars,
+	};
+}
 
 function countOccurrences(haystack: string, needle: string): number {
 	if (needle === "") return 0;
 	return haystack.split(needle).length - 1;
 }
 
-function lineStarts(text: string): number[] {
-	const starts = [0];
-	for (let i = 0; i < text.length; i++) {
-		if (text[i] === "\n") starts.push(i + 1);
-	}
-	return starts;
-}
-
-function lineNumberAtIndex(starts: number[], index: number): number {
-	let lo = 0;
-	let hi = starts.length - 1;
-	while (lo <= hi) {
-		const mid = Math.floor((lo + hi) / 2);
-		const v = starts[mid];
-		if (v === index) return mid + 1;
-		if (v < index) lo = mid + 1;
-		else hi = mid - 1;
-	}
-	return Math.max(1, hi + 1);
-}
-
-function computeAffectedLines(
-	source: string,
-	oldNeedle: string,
-	newContent: string,
+function applyReplacement(
+	currentContent: string | null,
+	oldString: string,
+	newString: string,
 	isNewFile: boolean,
-): number[] {
+): { newContent: string; occurrences: number } {
 	if (isNewFile) {
-		const count = newContent.length === 0 ? 0 : newContent.split("\n").length;
-		return Array.from({ length: count }, (_v, i) => i + 1);
+		return { newContent: newString, occurrences: 1 };
 	}
-	if (!oldNeedle) return [];
+	if (currentContent === null) {
+		return { newContent: "", occurrences: 0 };
+	}
+	if (oldString === "") {
+		return { newContent: currentContent, occurrences: 0 };
+	}
+	const occurrences = countOccurrences(currentContent, oldString);
+	const newContent = currentContent.split(oldString).join(newString);
+	return { newContent, occurrences };
+}
 
-	const starts = lineStarts(source);
-	const affected = new Set<number>();
-	let fromIndex = 0;
-	while (true) {
-		const idx = source.indexOf(oldNeedle, fromIndex);
-		if (idx === -1) break;
-		const startLine = lineNumberAtIndex(starts, idx);
-		const endIdx = Math.max(idx, idx + oldNeedle.length - 1);
-		const endLine = lineNumberAtIndex(starts, endIdx);
-		for (let l = startLine; l <= endLine; l++) affected.add(l);
-		fromIndex = idx + oldNeedle.length;
-	}
-	return Array.from(affected).sort((a, b) => a - b);
+function normalizeLineEndings(text: string): string {
+	return text.replace(/\r\n/g, "\n");
+}
+
+function restoreLineEndings(text: string, newline: "\n" | "\r\n"): string {
+	if (newline === "\n") return text;
+	return text.replace(/\n/g, "\r\n");
+}
+
+async function ensureParentDir(filePath: string) {
+	const dirName = path.dirname(filePath);
+	await fs.mkdir(dirName, { recursive: true });
 }
 
 export async function editTool(input: EditInput) {
@@ -125,227 +156,147 @@ export async function editTool(input: EditInput) {
 		old_string,
 		new_string,
 		expected_replacements,
-		replace_all,
-		apply,
-		allow_ignored,
+		modified_by_user,
+		ai_proposed_content,
 	} = input;
 
-	// Check for no-change edits early
-	if (old_string === new_string) {
-		return {
-			content: [
-				{
-					type: "text" as const,
-					text: `No changes to apply: old_string and new_string are identical.`,
-				},
-			],
-			structuredContent: {
-				error: ErrorCode.EDIT_NO_CHANGE,
-				message: "old_string and new_string are identical",
-			},
-		};
-	}
-
 	let abs: string;
+	let root: string;
 	try {
-		abs = resolveWithinWorkspace(file_path);
+		({ absPath: abs, root } = resolveWithinWorkspace(file_path));
 	} catch (e: unknown) {
 		const msg = e instanceof Error ? e.message : String(e);
 		return {
-			content: [{ type: "text" as const, text: msg }],
-			structuredContent: { error: ErrorCode.OUTSIDE_WORKSPACE, message: msg },
+			llmContent: msg,
+			returnDisplay: "Error: Path not in workspace.",
+			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
 		};
 	}
 
-	const relPosix = relativizePosix(abs);
+	const relPosix = relativizePosix(abs, root);
 	if (isSensitivePath(relPosix)) {
 		const msg = `Refusing to edit sensitive path: ${relPosix}`;
 		return {
-			content: [{ type: "text" as const, text: msg }],
-			structuredContent: {
-				error: ErrorCode.SENSITIVE_PATH,
-				message: msg,
-				path: abs,
-				relativePath: relPosix,
-			},
+			llmContent: msg,
+			returnDisplay: "Error: Path not in workspace.",
+			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
 		};
 	}
 
 	let current: string | null = null;
 	let exists = false;
-	let hadCrlf = false;
+	let originalLineEnding: "\n" | "\r\n" = "\n";
 	try {
 		const raw = await fs.readFile(abs, "utf8");
-		hadCrlf = raw.includes("\r\n");
-		current = raw.replace(/\r\n/g, "\n");
+		originalLineEnding = raw.includes("\r\n") ? "\r\n" : "\n";
+		current = normalizeLineEndings(raw);
 		exists = true;
-	} catch {}
-
-	// Respect .gitignore unless allow_ignored is true.
-	if (!allow_ignored) {
-		const ig = await buildIgnoreFilter({ respectGitIgnore: true });
-		if (ig.ignores(relPosix)) {
-			const msg = `Refusing to edit ignored file: ${relativize(abs)}`;
-			return {
-				content: [{ type: "text" as const, text: msg }],
-				structuredContent: {
-					error: ErrorCode.FILE_IGNORED,
-					message: msg,
-					path: abs,
-					relativePath: relPosix,
-				},
-			};
-		}
+	} catch {
+		exists = false;
 	}
 
-	if (!exists && old_string !== "") {
+	const isNewFile = !exists;
+	if (isNewFile && old_string !== "") {
+		const msg = `Error: No occurrence of old_string found in ${abs}`;
 		return {
-			content: [
-				{
-					type: "text" as const,
-					text: `File not found. Cannot apply edit unless old_string is empty to create a new file.`,
-				},
-			],
-			structuredContent: { error: ErrorCode.NOT_FOUND },
+			llmContent: msg,
+			returnDisplay: `Error: ${msg}`,
+			error: { message: msg, type: ToolErrorType.EDIT_NO_OCCURRENCE_FOUND },
 		};
 	}
 
-	// Better error for existing file with empty old_string
-	if (exists && old_string === "") {
-		return {
-			content: [
-				{
-					type: "text" as const,
-					text: `File already exists. Cannot use empty old_string on existing file. Use old_string to specify text to replace.`,
-				},
-			],
-			structuredContent: {
-				error: ErrorCode.EDIT_FILE_EXISTS,
-				message: "Cannot use empty old_string on existing file",
-			},
-		};
-	}
-
-	const isNewFile = !exists && old_string === "";
-	const source = current ?? "";
-	const oldNorm = old_string.replace(/\r\n/g, "\n");
-	const newNorm = new_string.replace(/\r\n/g, "\n");
-	const occ = isNewFile ? 0 : countOccurrences(source, oldNorm);
-	const expected = expected_replacements ?? 1;
+	const { newContent, occurrences } = applyReplacement(
+		current,
+		old_string,
+		new_string,
+		isNewFile,
+	);
 
 	if (!isNewFile) {
-		if (occ === 0) {
+		if (occurrences === 0) {
+			const msg = `Error: No occurrence of old_string found in ${abs}`;
 			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `Failed to edit: 0 occurrences found for old_string.`,
-					},
-				],
-				structuredContent: { error: ErrorCode.EDIT_NO_OCCURRENCE_FOUND },
+				llmContent: msg,
+				returnDisplay: `Error: ${msg}`,
+				error: { message: msg, type: ToolErrorType.EDIT_NO_OCCURRENCE_FOUND },
 			};
 		}
-		if (!replace_all && occ !== expected) {
+		if (
+			expected_replacements !== undefined &&
+			occurrences !== expected_replacements
+		) {
+			const msg = `Error: Expected ${expected_replacements} occurrences but found ${occurrences} in ${abs}`;
 			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `Failed to edit: expected ${expected} occurrences but found ${occ}.`,
-					},
-				],
-				structuredContent: {
-					error: ErrorCode.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
-				},
-			};
-		}
-		if (replace_all && expected_replacements !== undefined && occ !== expected) {
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `Failed to edit: expected ${expected} occurrences but found ${occ}.`,
-					},
-				],
-				structuredContent: {
-					error: ErrorCode.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+				llmContent: msg,
+				returnDisplay: `Error: ${msg}`,
+				error: {
+					message: msg,
+					type: ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
 				},
 			};
 		}
 	}
 
-	const newContent = isNewFile ? newNorm : source.split(oldNorm).join(newNorm);
-
-	// Check if content actually changed
-	if (!isNewFile && newContent === source) {
+	if (!isNewFile && current === newContent) {
+		const msg = "No changes to apply: old_string and new_string are identical.";
 		return {
-			content: [
-				{
-					type: "text" as const,
-					text: `No changes resulted from the edit operation.`,
-				},
-			],
-			structuredContent: {
-				error: ErrorCode.EDIT_NO_CHANGE,
-				message: "Content unchanged after replacements",
-			},
+			llmContent: msg,
+			returnDisplay: "Error: No changes.",
+			error: { message: msg, type: ToolErrorType.EDIT_NO_CHANGE },
+		};
+	}
+
+	const normalizedNew = restoreLineEndings(newContent, originalLineEnding);
+	try {
+		await ensureParentDir(abs);
+		await fs.writeFile(abs, normalizedNew, "utf8");
+	} catch (error) {
+		const errorMsg = error instanceof Error ? error.message : String(error);
+		return {
+			llmContent: `Error executing edit: ${errorMsg}`,
+			returnDisplay: `Error writing file: ${errorMsg}`,
+			error: { message: errorMsg, type: ToolErrorType.FILE_WRITE_FAILURE },
 		};
 	}
 
 	const fileName = path.basename(abs);
-	const diff = Diff.createPatch(
+	const fileDiff = Diff.createPatch(
 		fileName,
-		source,
+		current ?? "",
 		newContent,
 		"Current",
 		"Proposed",
+		{ context: 3, ignoreWhitespace: false },
 	);
-	const rel = relativize(abs);
-
-	// Add summary to structured content
-	const summary = isNewFile
-		? "Creating new file"
-		: `Replacing ${occ} occurrence${occ > 1 ? "s" : ""} in file`;
-
-	const affectedLines = computeAffectedLines(
-		source,
-		oldNorm,
+	const diffStat = getDiffStat(
+		fileName,
+		current ?? "",
+		ai_proposed_content ?? newContent,
 		newContent,
-		isNewFile,
 	);
-	const totalLinesAffected = affectedLines.length;
+	const displayResult = {
+		fileDiff,
+		fileName,
+		filePath: abs,
+		originalContent: current,
+		newContent,
+		diffStat,
+		isNewFile,
+	};
 
-	if (!apply) {
-		const preview = `Edit preview for ${rel} (not applied). To apply, call edit with apply: true.\n\n${diff}`;
-		return {
-			content: [{ type: "text" as const, text: preview }],
-			structuredContent: {
-				path: abs,
-				relativePath: relPosix,
-				applied: false,
-				diff,
-				occurrences: isNewFile ? 0 : occ,
-				affectedLines,
-				totalLinesAffected,
-				summary: `${summary} (preview)`,
-			},
-		};
+	const llmSuccessMessageParts = [
+		isNewFile
+			? `Created new file: ${abs} with provided content.`
+			: `Successfully modified file: ${abs} (${occurrences} replacements).`,
+	];
+	if (modified_by_user) {
+		llmSuccessMessageParts.push(
+			`User modified the \`new_string\` content to be: ${new_string}.`,
+		);
 	}
 
-	await fs.mkdir(path.dirname(abs), { recursive: true });
-	const toWrite = hadCrlf ? newContent.replace(/\n/g, "\r\n") : newContent;
-	await fs.writeFile(abs, toWrite, "utf8");
-	const result = `Applied edit to ${rel}.\n\n${diff}`;
 	return {
-		content: [{ type: "text" as const, text: result }],
-		structuredContent: {
-			path: abs,
-			relativePath: relPosix,
-			applied: true,
-			diff,
-			occurrences: isNewFile ? 0 : occ,
-			affectedLines,
-			totalLinesAffected,
-			summary: `${summary} (applied)`,
-		},
+		llmContent: llmSuccessMessageParts.join(" "),
+		returnDisplay: displayResult,
 	};
 }

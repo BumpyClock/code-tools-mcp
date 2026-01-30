@@ -1,9 +1,9 @@
 **Code Tools MCP Server**
 
 - Local-only MCP server exposing core coding tools for LLMs via STDIO.
-- Tools: `list_directory`, `read_file`, `write_file`, `grep`, `ripgrep`, `glob`, `edit`, `read_many_files`.
+- Tools: `list_directory`, `read_file`, `write_file`, `search_file_content`, `glob`, `replace`, `read_many_files`.
 
-Codex CLI on windows sort of sucks because it relies on writing PS / Python scripts for basic read, write, grep operations. This MCP server exposes those standard tools making Codex CLI faster on Windows. You can use it on Linux or Mac, it will work but may not be necessary. 
+Codex CLI on windows sort of sucks because it relies on writing PS / Python scripts for basic read, write, grep operations. This MCP server exposes those standard tools making Codex CLI faster on Windows. You can use it on Linux or Mac, it will work but may not be necessary.
 
 This is without warranty, any issues or bugs should be reported to the repository but be aware of the risks and use it at your own risk.
 
@@ -31,6 +31,9 @@ Workspace root is auto-detected:
 - Else if a CLI flag is passed, it’s used: `--root C:/path/to/workspace` (or `-r`).
 - Else, the server looks upward from the current working directory for a `.git` folder and uses that directory as root.
 - Else, it defaults to the current working directory.
+
+Additional workspace roots:
+- Set `CODE_TOOLS_MCP_ROOTS` or pass `--roots` (path.delimiter-separated) to add extra workspace directories.
 
 Claude config example without env var (pass a root flag):
 ```
@@ -69,9 +72,8 @@ Add to your Claude config JSON:
 **Notes**
 
 - Uses STDIO transport; avoid `console.log` (stdout). Any diagnostics are written to stderr.
-- File operations are restricted to the workspace root.
-- `read_file` caps file size at 2MB; larger batch reads are capped via `read_many_files`.
-- Ignore rules honor nested `.gitignore`, `.git/info/exclude`, and common global ignore files (`.geminiignore` is NOT supported).
+- File operations are restricted to workspace roots.
+- `.geminiignore` parameters are accepted for parity but currently ignored.
 
 
 ---
@@ -83,229 +85,128 @@ Add to your Claude config JSON:
 ## Tools
 
 ### list_directory
-Lists directory contents with directories first, respects `.gitignore` (recursive optional).
+Lists directory contents with directories first, respects `.gitignore`.
 
 **Parameters:**
-- `path` (string, required): Absolute path, or workspace-relative path to directory
-- `recursive` (boolean, optional): If true, list entries recursively (default: false)
-- `max_depth` (number, optional): Max recursion depth when `recursive: true` (default: 10)
-- `ignore` (string[], optional): Glob patterns to ignore
-- `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean }`
+- `dir_path` (string, required): Absolute path, or workspace-relative path to directory
+- `ignore` (string[], optional): Glob patterns to ignore (name matching)
+- `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean, respect_gemini_ignore?: boolean }`
 
 **Example:**
 ```typescript
 await client.callTool('list_directory', {
-  path: '/path/to/workspace/src'
+  dir_path: '/path/to/workspace/src'
 });
 ```
 
 ### read_file
-Reads a file with optional pagination. Binary-aware.
+Reads a file with optional pagination. Binary-aware (images, audio, PDF).
 
 **Parameters:**
-- `absolute_path` (string, required): Absolute path, or workspace-relative path to file
+- `file_path` (string, required): Absolute path, or workspace-relative path to file
 - `offset` (number, optional): Starting line (0-based)
-- `limit` (number, optional): Number of lines to return (max 2000)
-- `allow_ignored` (boolean, optional): Allow reading `.gitignore`-ignored files (default: false)
-
-**Features:**
-- Returns `nextOffset` in structured content for paginated reads
-- Includes `summary` with line count in all responses
+- `limit` (number, optional): Number of lines to return
 
 **Example:**
 ```typescript
 await client.callTool('read_file', {
-  absolute_path: '/path/to/workspace/src/index.ts',
+  file_path: '/path/to/workspace/src/index.ts',
   offset: 0,
   limit: 100
 });
 ```
 
 ### write_file
-Creates or overwrites a file with preview mode.
+Creates or overwrites a file.
 
 **Parameters:**
 - `file_path` (string, required): Absolute path, or workspace-relative path of file to write
 - `content` (string, required): Full file content
-- `apply` (boolean, default: false): If false, returns diff preview without writing
-- `overwrite` (boolean, default: true): Allow overwriting existing files
-- `allow_ignored` (boolean, optional): Allow writing `.gitignore`-ignored files (default: false)
-
-**Features:**
-- Preview mode by default (set `apply: true` to write)
-- Returns diff in structured content
+- `modified_by_user` (boolean, optional)
+- `ai_proposed_content` (string, optional)
 
 **Example:**
 ```typescript
 await client.callTool('write_file', {
   file_path: '/path/to/workspace/src/new-file.ts',
-  content: 'export const foo = "bar";',
-  apply: true
+  content: 'export const foo = "bar";'
 });
 ```
 
-### grep
-Text/regex search with smart-case support.
+### search_file_content
+Fast regex search using ripgrep (falls back to JS search if unavailable).
 
 **Parameters:**
-- `pattern` (string, required): Search pattern (plain text or regex if `regex: true`)
-- `path` (string, optional): Directory/file path (absolute or workspace-relative)
-- `include` (string, optional): Glob filter (e.g., `**/*.{ts,tsx}`)
-- `exclude` (string | string[], optional): Glob exclusion patterns
-- `regex` (boolean, default: false): Treat pattern as regex
-- `ignore_case` (boolean, optional): Case-insensitive search. If undefined, uses smart-case (case-sensitive if pattern has uppercase)
-- `match_whole_word` (boolean, optional): Match whole words only (word boundaries)
-- `context_lines_before` (number, optional): Context lines before each match (-B)
-- `context_lines_after` (number, optional): Context lines after each match (-A)
-- `context_lines` (number, optional): Context lines before/after each match (-C)
-- `output_mode` (string, optional): `'full' | 'files_only' | 'count'` (default: `'full'`)
-- `max_matches` (number, default: 2000): Maximum matches to return
-- `useDefaultExcludes` (boolean, optional): Apply default excludes (node_modules, dist, .git, etc.). Default true.
-
-**Features:**
-- Smart-case: automatically case-sensitive if pattern contains uppercase letters
-- Skips binary files
-- Respects `.gitignore`
-- Returns `truncated: true` if max_matches reached
-- Optional context lines to reduce follow-up `read_file` calls
-- `output_mode: 'files_only'` returns just matching file paths
+- `pattern` (string, required): Search pattern (regex by default)
+- `dir_path` (string, optional): Directory or file to search (absolute or workspace-relative)
+- `include` (string, optional): Glob filter (e.g., `**/*.ts`)
+- `case_sensitive` (boolean, optional): If true, search is case-sensitive (default false)
+- `fixed_strings` (boolean, optional): If true, treat pattern as literal
+- `context` (number, optional): Context lines around each match (-C)
+- `after` (number, optional): Lines after each match (-A)
+- `before` (number, optional): Lines before each match (-B)
+- `no_ignore` (boolean, optional): If true, do not respect ignore files/default excludes
 
 **Example:**
 ```typescript
-await client.callTool('grep', {
+await client.callTool('search_file_content', {
   pattern: 'function.*async',
-  regex: true,
-  include: '**/*.ts',
-  max_matches: 100
-});
-```
-
-### ripgrep
-Fast regex search using ripgrep binary (falls back to grep if unavailable).
-
-**Parameters:**
-- `pattern` (string, required): Regular expression
-- `path` (string, optional): Directory or file to search (absolute or workspace-relative)
-- `include` (string | string[], optional): Glob include patterns
-- `exclude` (string | string[], optional): Glob exclude patterns
-- `ignore_case` (boolean, optional): If undefined, uses `--smart-case`
-- `context_lines_before` (number, optional): Context lines before each match (-B)
-- `context_lines_after` (number, optional): Context lines after each match (-A)
-- `context_lines` (number, optional): Context lines before/after each match (-C)
-- `output_mode` (string, optional): `'full' | 'files_only' | 'count'` (default: `'full'`)
-- `max_matches` (number, default: 20000): Maximum matches to return
-
-**Features:**
-- Uses `--smart-case` by default when `ignore_case` not specified
-- Returns `truncated: true` if max_matches reached
-- Falls back to JavaScript grep if ripgrep unavailable
-- Captures stderr in `structuredContent.stderr`
-
-**Example:**
-```typescript
-await client.callTool('ripgrep', {
-  pattern: 'TODO|FIXME',
-  include: ['**/*.ts', '**/*.tsx'],
-  exclude: '**/node_modules/**'
+  include: '**/*.ts'
 });
 ```
 
 ### glob
-Matches files by glob pattern with two-tier sorting.
+Finds files matching a glob pattern.
 
 **Parameters:**
-- `pattern` (string, required): Glob pattern (e.g., `**/*.ts`)
-- `path` (string, optional): Directory to search (absolute or workspace-relative; defaults to workspace root)
-- `case_sensitive` (boolean, default: false): Case-sensitive matching
-- `respect_git_ignore` (boolean, default: true): Respect `.gitignore`
-- `include_hidden` (boolean, default: true): Include hidden files (dotfiles)
-- `max_files` (number, default: 1000): Maximum files to return
-
-**Features:**
-- Two-tier sorting: recent files (< 24h) newest-first, then older files alphabetically
-- Reports `gitIgnoredCount` when no files found
-- Returns `truncated: true` if `max_files` reached
+- `pattern` (string, required): Glob pattern (e.g., `src/**/*.ts`)
+- `dir_path` (string, optional): Absolute directory to search within
+- `case_sensitive` (boolean, optional): Case-sensitive matching (default false)
+- `respect_git_ignore` (boolean, optional): Respect .gitignore (default true)
+- `respect_gemini_ignore` (boolean, optional): Reserved for Gemini compatibility
 
 **Example:**
 ```typescript
 await client.callTool('glob', {
-  pattern: '**/*.{ts,tsx}',
-  path: '/path/to/workspace/src'
+  pattern: 'src/**/*.ts'
 });
 ```
 
-### edit
-Targeted text replacement with preview mode.
+### replace
+Replaces text within a file using exact literal matching.
 
 **Parameters:**
-- `file_path` (string, required): Absolute path, or workspace-relative path to file
-- `old_string` (string, required): Text to replace (empty string creates new file)
-- `new_string` (string, required): Replacement text
-- `expected_replacements` (number, default: 1): Expected number of replacements
-- `apply` (boolean, default: false): If false, returns diff preview
-- `allow_ignored` (boolean, optional): Allow editing `.gitignore`-ignored files (default: false)
-
-**Features:**
-- Preview mode by default
-- Detects no-change edits
-- Returns `occurrences` in structured content
-- Adds `affectedLines` + `totalLinesAffected` in structured content (preview and applied)
+- `file_path` (string, required)
+- `instruction` (string, optional)
+- `old_string` (string, required)
+- `new_string` (string, required)
+- `expected_replacements` (number, optional)
+- `modified_by_user` (boolean, optional)
+- `ai_proposed_content` (string, optional)
 
 **Example:**
 ```typescript
-await client.callTool('edit', {
+await client.callTool('replace', {
   file_path: '/path/to/workspace/src/index.ts',
-  old_string: 'const foo = "old";',
-  new_string: 'const foo = "new";',
-  apply: true
+  old_string: 'const foo = 1;',
+  new_string: 'const foo = 2;'
 });
 ```
 
 ### read_many_files
-Reads multiple files by glob patterns, concatenated output.
+Reads and concatenates content from multiple files.
 
 **Parameters:**
-- `paths` (string[], required): Array of file/directory globs
-- `include` (string[], optional): Additional glob patterns to include
-- `exclude` (string[], optional): Glob patterns to exclude
-- `useDefaultExcludes` (boolean, default: true): Apply default excludes (node_modules, dist, .git, etc.)
-- `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean }`
-
-**Features:**
-- 2MB total output cap
-- Workspace containment re-check for safety
-- Aggregated skip reasons in structured content (`skipCounts`)
-- Adds `fileStats` with per-file line/byte counts
-
----
-## Error Codes
-
-All tools return `structuredContent.error` using standardized codes (when an error occurs). Most errors also include a human-readable `structuredContent.message`.
-
-- `NOT_FOUND`
-- `OUTSIDE_WORKSPACE`
-- `SENSITIVE_PATH`
-- `FILE_IGNORED`
-- `PATH_IS_NOT_A_DIRECTORY`
-- `FILE_TOO_LARGE`
-- `INVALID_REGEX`
-- `EDIT_NO_CHANGE`
-- `EDIT_FILE_EXISTS`
-- `EDIT_NO_OCCURRENCE_FOUND`
-- `EDIT_EXPECTED_OCCURRENCE_MISMATCH`
-- `OVERWRITE_DISABLED`
-- `PERMISSION_DENIED`
-- `DISK_FULL`
-- `IS_DIRECTORY`
-- `PARENT_NOT_DIRECTORY`
-- `WRITE_FAILED`
-- Returns `truncated: true` when total cap reached
+- `include` (string[], required): Glob patterns or paths
+- `exclude` (string[], optional)
+- `recursive` (boolean, optional): Defaults to true
+- `useDefaultExcludes` (boolean, optional): Defaults to true
+- `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean, respect_gemini_ignore?: boolean }`
 
 **Example:**
 ```typescript
 await client.callTool('read_many_files', {
-  paths: ['src/**/*.ts'],
-  exclude: ['**/*.test.ts']
+  include: ['src/**/*.ts']
 });
 ```
 
@@ -345,38 +246,11 @@ console.log('Available tools:', tools.tools.map(t => t.name));
 const result = await client.callTool({
   name: 'read_file',
   arguments: {
-    absolute_path: '/path/to/workspace/src/index.ts'
+    file_path: '/path/to/workspace/src/index.ts'
   }
 });
 
 console.log('Result:', result);
-```
-
-### Pagination Example
-
-```typescript
-// Read large file in chunks
-let offset = 0;
-const limit = 100;
-
-while (true) {
-  const result = await client.callTool({
-    name: 'read_file',
-    arguments: {
-      absolute_path: '/path/to/large-file.ts',
-      offset,
-      limit
-    }
-  });
-
-  console.log(result.content[0].text);
-
-  // Check if there's more to read
-  const nextOffset = result.structuredContent?.nextOffset;
-  if (!nextOffset) break;
-
-  offset = nextOffset;
-}
 ```
 
 ---
@@ -386,12 +260,6 @@ while (true) {
 - **Tool names are stable** and will not change in minor versions
 - **Parameter names are stable** - new optional parameters may be added
 - **Descriptions are concise** - detailed parameter docs are in JSON Schema (via Zod `.describe()`)
-- **Structured content** includes `summary` field for all tools where applicable
-- **Defaults and limits** are documented in parameter descriptions:
-  - `read_file`: 2MB file cap, 2000 line limit per request
-  - `read_many_files`: 2MB total output cap, 1MB per file
-  - `grep`: 2000 matches default, configurable via `max_matches`
-  - `ripgrep`: 20000 matches default, configurable via `max_matches`
 
 ---
 
@@ -402,9 +270,9 @@ All tool input and output types are available in `src/types/tools.ts`:
 ```typescript
 import type {
   ReadFileInput,
-  ReadFileStructuredOutput,
-  GrepInput,
-  GrepStructuredOutput,
+  ReadFileOutput,
+  SearchFileContentInput,
+  SearchFileContentOutput,
   // ... other types
 } from 'code-tools-mcp/types/tools';
 ```

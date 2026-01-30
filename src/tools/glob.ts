@@ -5,215 +5,197 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import fg from "fast-glob";
 import { z } from "zod";
-import { ErrorCode } from "../types/error-codes.js";
+import { ToolErrorType } from "../types/tool-error-type.js";
+import { toolResultShape } from "../types/tool-result.js";
 import { buildIgnoreFilter } from "../utils/ignore.js";
 import {
-	getWorkspaceRoot,
+	getWorkspaceRoots,
 	isSensitivePath,
 	resolveWithinWorkspace,
 	toPosixPath,
 } from "../utils/workspace.js";
 
 export const globShape = {
-	pattern: z.string().describe("Glob pattern, e.g. **/*.ts"),
-	path: z
+	pattern: z.string().describe("Glob pattern to match against."),
+	dir_path: z
 		.string()
 		.optional()
 		.describe(
-			"Directory to search within (absolute or workspace-relative); defaults to workspace root.",
+			"Optional absolute path to directory to search within. If omitted, searches all workspace directories.",
 		),
 	case_sensitive: z
 		.boolean()
 		.optional()
-		.describe("Match case sensitively (default false)."),
+		.describe("Optional: case-sensitive matching (default false)."),
 	respect_git_ignore: z
 		.boolean()
 		.optional()
-		.describe("Respect .gitignore (default true)."),
-	include_hidden: z
+		.describe("Optional: respect .gitignore patterns (default true)."),
+	respect_gemini_ignore: z
 		.boolean()
 		.optional()
-		.describe("Include hidden files (dotfiles). Default true."),
-	max_files: z
-		.number()
-		.int()
-		.min(1)
-		.optional()
-		.describe("Maximum number of files to return (default 1000)."),
+		.describe("Optional: respect .geminiignore patterns (default true)."),
 };
 export const globInput = z.object(globShape);
 export type GlobInput = z.infer<typeof globInput>;
 
-// Output schema for structured content returned by this tool
-export const globOutputShape = {
-	files: z.array(z.string()),
-	relativeFiles: z.array(z.string()).optional(),
-	summary: z.string(),
-	truncated: z.boolean().optional(),
-	maxFiles: z.number().optional(),
-	gitIgnoredCount: z.number().optional(),
-	error: z.string().optional(),
-	message: z.string().optional(),
-};
+export const globOutputShape = toolResultShape;
 
-export async function globTool(input: GlobInput) {
-	const root = getWorkspaceRoot();
-	let baseDir = root;
-	if (input.path) {
+const DEFAULT_EXCLUDES = ["**/{node_modules,.git,dist,build,out}/**"];
+
+interface GlobPath {
+	path: string;
+	mtimeMs?: number;
+}
+
+function sortFileEntries(
+	entries: GlobPath[],
+	nowTimestamp: number,
+): GlobPath[] {
+	const oneDayInMs = 24 * 60 * 60 * 1000;
+	const sorted = [...entries];
+	sorted.sort((a, b) => {
+		const mtimeA = a.mtimeMs ?? 0;
+		const mtimeB = b.mtimeMs ?? 0;
+		const aIsRecent = nowTimestamp - mtimeA < oneDayInMs;
+		const bIsRecent = nowTimestamp - mtimeB < oneDayInMs;
+		if (aIsRecent && bIsRecent) return mtimeB - mtimeA;
+		if (aIsRecent) return -1;
+		if (bIsRecent) return 1;
+		return a.path.localeCompare(b.path);
+	});
+	return sorted;
+}
+
+async function gatherEntries(
+	searchDir: string,
+	pattern: string,
+	caseSensitive: boolean,
+): Promise<GlobPath[]> {
+	const paths = await fg(pattern, {
+		cwd: searchDir,
+		onlyFiles: true,
+		caseSensitiveMatch: caseSensitive,
+		dot: true,
+		absolute: true,
+		followSymbolicLinks: false,
+		ignore: DEFAULT_EXCLUDES,
+	});
+
+	const entries: GlobPath[] = [];
+	for (const entry of paths) {
+		const stats = await fs.stat(entry).catch(() => null);
+		entries.push({ path: entry, mtimeMs: stats?.mtimeMs ?? 0 });
+	}
+	return entries;
+}
+
+export async function globTool(input: GlobInput, _signal?: AbortSignal) {
+	const caseSensitive = input.case_sensitive ?? false;
+	const respectGit = input.respect_git_ignore ?? true;
+
+	let searchTargets: Array<{ dir: string; root: string }> = [];
+	if (input.dir_path) {
 		try {
-			baseDir = resolveWithinWorkspace(
-				path.isAbsolute(input.path) ? input.path : path.join(root, input.path),
-			);
+			const resolved = resolveWithinWorkspace(input.dir_path);
+			searchTargets = [{ dir: resolved.absPath, root: resolved.root }];
 		} catch (e: unknown) {
 			const msg = e instanceof Error ? e.message : String(e);
 			return {
-				content: [{ type: "text" as const, text: msg }],
-				structuredContent: {
-					files: [],
-					relativeFiles: [],
-					summary: "Invalid path.",
-					error: ErrorCode.OUTSIDE_WORKSPACE,
-					message: msg,
+				llmContent: msg,
+				returnDisplay: "Path not in workspace.",
+				error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
+			};
+		}
+	} else {
+		searchTargets = getWorkspaceRoots().map((root) => ({ dir: root, root }));
+	}
+
+	const allEntries: GlobPath[] = [];
+	let ignoredCount = 0;
+
+	for (const target of searchTargets) {
+		const st = await fs.stat(target.dir).catch(() => null);
+		if (!st) {
+			return {
+				llmContent: `Search path does not exist ${target.dir}`,
+				returnDisplay: "Path not found.",
+				error: {
+					message: `Search path does not exist ${target.dir}`,
+					type: ToolErrorType.SEARCH_PATH_NOT_FOUND,
 				},
 			};
 		}
-	}
-
-	const baseDirRelPosix = toPosixPath(path.relative(root, baseDir) || ".");
-	if (isSensitivePath(baseDirRelPosix)) {
-		const msg = `Refusing to glob in sensitive path: ${baseDirRelPosix}`;
-		return {
-			content: [{ type: "text" as const, text: msg }],
-			structuredContent: {
-				files: [],
-				relativeFiles: [],
-				summary: "Refused sensitive path.",
-				error: ErrorCode.SENSITIVE_PATH,
-				message: msg,
-			},
-		};
-	}
-
-	const st = await fs.stat(baseDir).catch(() => null);
-	if (!st) {
-		const msg = `Path not found: ${baseDir}`;
-		return {
-			content: [{ type: "text" as const, text: msg }],
-			structuredContent: {
-				files: [],
-				relativeFiles: [],
-				summary: "Path not found.",
-				error: ErrorCode.NOT_FOUND,
-				message: msg,
-			},
-		};
-	}
-	if (!st.isDirectory()) {
-		const msg = `Path is not a directory: ${baseDirRelPosix}`;
-		return {
-			content: [{ type: "text" as const, text: msg }],
-			structuredContent: {
-				files: [],
-				relativeFiles: [],
-				summary: "Path is not a directory.",
-				error: ErrorCode.PATH_IS_NOT_A_DIRECTORY,
-				message: msg,
-			},
-		};
-	}
-
-	const ig = await buildIgnoreFilter({
-		respectGitIgnore: input.respect_git_ignore ?? true,
-	});
-
-	// Use objectMode for better performance - no extra fs.stat calls
-	const entries = await fg(input.pattern, {
-		cwd: baseDir,
-		dot: input.include_hidden ?? true,
-		caseSensitiveMatch: input.case_sensitive ?? false,
-		onlyFiles: true,
-		absolute: true,
-		followSymbolicLinks: false,
-		objectMode: true, // Use objectMode to get entries with stats
-	});
-
-	// Filter by ignore rules relative to workspace root
-	const filtered = [] as Array<{ full: string; mtimeMs: number; name: string }>;
-	let gitIgnoredCount = 0;
-
-	for (const entry of entries) {
-		const rel = toPosixPath(path.relative(root, entry.path));
-		if (isSensitivePath(rel)) {
-			gitIgnoredCount++;
-			continue;
-		}
-		if (ig.ignores(rel)) {
-			gitIgnoredCount++;
-			continue;
-		}
-		filtered.push({
-			full: entry.path,
-			mtimeMs: entry.stats?.mtimeMs || 0,
-			name: path.basename(entry.path),
-		});
-	}
-
-	if (filtered.length === 0) {
-		const baseDirRel = path.relative(root, baseDir) || ".";
-		const ignoreNote =
-			gitIgnoredCount > 0
-				? ` (${gitIgnoredCount} files ignored by .gitignore)`
-				: "";
-		return {
-			content: [
-				{
-					type: "text" as const,
-					text: `No files found matching "${input.pattern}" in ${baseDirRel}${ignoreNote}`,
+		if (!st.isDirectory()) {
+			return {
+				llmContent: `Search path is not a directory: ${target.dir}`,
+				returnDisplay: "Path is not a directory.",
+				error: {
+					message: `Search path is not a directory: ${target.dir}`,
+					type: ToolErrorType.SEARCH_PATH_NOT_A_DIRECTORY,
 				},
-			],
-			structuredContent: {
-				files: [],
-				summary: "No files found.",
-				gitIgnoredCount: gitIgnoredCount > 0 ? gitIgnoredCount : undefined,
-			},
+			};
+		}
+
+		const entries = await gatherEntries(
+			target.dir,
+			input.pattern,
+			caseSensitive,
+		);
+		if (!respectGit) {
+			allEntries.push(...entries);
+			continue;
+		}
+		const ig = await buildIgnoreFilter({ respectGitIgnore: true }, target.root);
+		for (const entry of entries) {
+			const rel = toPosixPath(path.relative(target.root, entry.path));
+			if (isSensitivePath(rel)) {
+				ignoredCount += 1;
+				continue;
+			}
+			if (ig.ignores(rel)) {
+				ignoredCount += 1;
+				continue;
+			}
+			allEntries.push(entry);
+		}
+	}
+
+	if (allEntries.length === 0) {
+		let message = `No files found matching pattern "${input.pattern}"`;
+		if (searchTargets.length === 1) {
+			message += ` within ${searchTargets[0]?.dir}`;
+		} else {
+			message += ` within ${searchTargets.length} workspace directories`;
+		}
+		if (ignoredCount > 0) {
+			message += ` (${ignoredCount} files were ignored)`;
+		}
+		return {
+			llmContent: message,
+			returnDisplay: "No files found",
 		};
 	}
 
-	// Two-tier sorting: recent files (< 24h) newest-first, then older files alphabetically
 	const now = Date.now();
-	const dayMs = 24 * 60 * 60 * 1000;
+	const sortedEntries = sortFileEntries(allEntries, now);
+	const sortedAbsolutePaths = sortedEntries.map((entry) => entry.path);
+	const fileListDescription = sortedAbsolutePaths.join("\n");
+	const fileCount = sortedAbsolutePaths.length;
 
-	const recent = filtered.filter((f) => now - f.mtimeMs < dayMs);
-	const older = filtered.filter((f) => now - f.mtimeMs >= dayMs);
+	let resultMessage = `Found ${fileCount} file(s) matching "${input.pattern}"`;
+	if (searchTargets.length === 1) {
+		resultMessage += ` within ${searchTargets[0]?.dir}`;
+	} else {
+		resultMessage += ` across ${searchTargets.length} workspace directories`;
+	}
+	if (ignoredCount > 0) {
+		resultMessage += ` (${ignoredCount} additional files were ignored)`;
+	}
+	resultMessage += `, sorted by modification time (newest first):\n${fileListDescription}`;
 
-	// Sort recent by modification time (newest first)
-	recent.sort((a, b) => b.mtimeMs - a.mtimeMs);
-
-	// Sort older alphabetically by filename
-	older.sort((a, b) => a.name.localeCompare(b.name));
-
-	// Combine: recent files first, then older files
-	const sorted = [...recent, ...older];
-
-	const maxFiles = input.max_files ?? 1000;
-	const truncated = sorted.length > maxFiles;
-	const limited = truncated ? sorted.slice(0, maxFiles) : sorted;
-
-	const files = limited.map((f) => f.full);
-	const relativeFiles = limited.map((f) =>
-		toPosixPath(path.relative(root, f.full)),
-	);
-	const text = files.join("\n");
 	return {
-		content: [{ type: "text" as const, text }],
-		structuredContent: {
-			files,
-			relativeFiles,
-			summary: truncated
-				? `Found ${files.length} matching file(s) (limited to ${maxFiles}).`
-				: `Found ${files.length} matching file(s).`,
-			truncated: truncated || undefined,
-			maxFiles: truncated ? maxFiles : undefined,
-		},
+		llmContent: resultMessage,
+		returnDisplay: `Found ${fileCount} matching file(s)`,
 	};
 }

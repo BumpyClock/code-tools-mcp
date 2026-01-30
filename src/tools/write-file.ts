@@ -1,15 +1,14 @@
-// ABOUTME: Writes a file within the workspace with a preview-first workflow.
-// ABOUTME: Enforces workspace containment, ignore rules, and basic safety blocks.
+// ABOUTME: Writes a file within the workspace.
+// ABOUTME: Returns a diff-like display object in Gemini CLI style.
 
 import fs from "node:fs/promises";
 import path from "node:path";
 import * as Diff from "diff";
 import { z } from "zod";
-import { ErrorCode } from "../types/error-codes.js";
-import { buildIgnoreFilter } from "../utils/ignore.js";
+import { ToolErrorType } from "../types/tool-error-type.js";
+import { toolResultShape } from "../types/tool-result.js";
 import {
 	isSensitivePath,
-	relativize,
 	relativizePosix,
 	resolveWithinWorkspace,
 } from "../utils/workspace.js";
@@ -18,43 +17,86 @@ export const writeFileShape = {
 	file_path: z
 		.string()
 		.describe(
-			"Absolute path within the workspace, or a path relative to workspace root.",
+			"The path to the file to write to (absolute or workspace-relative).",
 		),
-	content: z.string().describe("Proposed full file content."),
-	// Parity-inspired options
-	apply: z
-		.boolean()
-		.default(false)
-		.describe("If false (default), return a diff preview without writing."),
-	overwrite: z
-		.boolean()
-		.default(true)
-		.describe("Allow overwriting existing files."),
-	allow_ignored: z
-		.boolean()
-		.optional()
-		.describe(
-			"Optional: allow writing files ignored by .gitignore (default false).",
-		),
+	content: z.string().describe("The content to write to the file."),
 	modified_by_user: z.boolean().optional(),
 	ai_proposed_content: z.string().optional(),
 };
 export const writeFileInput = z.object(writeFileShape);
 export type WriteFileInput = z.infer<typeof writeFileInput>;
 
-// Output schema for structured content returned by this tool
-export const writeFileOutputShape = {
-	path: z.string().optional(),
-	relativePath: z.string().optional(),
-	applied: z.boolean().optional(),
-	diff: z.string().optional(),
-	summary: z.string().optional(),
-	linesAdded: z.number().optional(),
-	linesRemoved: z.number().optional(),
-	modifiedByUser: z.boolean().optional(),
-	error: z.string().optional(),
-	message: z.string().optional(),
-};
+export const writeFileOutputShape = toolResultShape;
+
+interface DiffStat {
+	model_added_lines: number;
+	model_removed_lines: number;
+	model_added_chars: number;
+	model_removed_chars: number;
+	user_added_lines: number;
+	user_removed_lines: number;
+	user_added_chars: number;
+	user_removed_chars: number;
+}
+
+function getDiffStat(
+	fileName: string,
+	oldStr: string,
+	aiStr: string,
+	userStr: string,
+): DiffStat {
+	const getStats = (patch: Diff.StructuredPatch) => {
+		let addedLines = 0;
+		let removedLines = 0;
+		let addedChars = 0;
+		let removedChars = 0;
+		patch.hunks.forEach((hunk) => {
+			hunk.lines.forEach((line) => {
+				if (line.startsWith("+")) {
+					addedLines++;
+					addedChars += line.length - 1;
+				} else if (line.startsWith("-")) {
+					removedLines++;
+					removedChars += line.length - 1;
+				}
+			});
+		});
+		return { addedLines, removedLines, addedChars, removedChars };
+	};
+
+	const modelPatch = Diff.structuredPatch(
+		fileName,
+		fileName,
+		oldStr,
+		aiStr,
+		"Current",
+		"Proposed",
+		{ context: 3, ignoreWhitespace: false },
+	);
+	const modelStats = getStats(modelPatch);
+
+	const userPatch = Diff.structuredPatch(
+		fileName,
+		fileName,
+		aiStr,
+		userStr,
+		"Proposed",
+		"User",
+		{ context: 3, ignoreWhitespace: false },
+	);
+	const userStats = getStats(userPatch);
+
+	return {
+		model_added_lines: modelStats.addedLines,
+		model_removed_lines: modelStats.removedLines,
+		model_added_chars: modelStats.addedChars,
+		model_removed_chars: modelStats.removedChars,
+		user_added_lines: userStats.addedLines,
+		user_removed_lines: userStats.removedLines,
+		user_added_chars: userStats.addedChars,
+		user_removed_chars: userStats.removedChars,
+	};
+}
 
 async function readIfExists(
 	abs: string,
@@ -62,193 +104,95 @@ async function readIfExists(
 	try {
 		const buf = await fs.readFile(abs, "utf8");
 		return { exists: true, content: buf };
-	} catch (_e) {
+	} catch {
 		return { exists: false, content: "" };
 	}
 }
 
-function unifiedDiff(filename: string, oldStr: string, newStr: string) {
-	return Diff.createPatch(filename, oldStr, newStr, "Current", "Proposed");
-}
-
-function getDiffStats(
-	oldStr: string,
-	newStr: string,
-): { added: number; removed: number } {
-	const changes = Diff.diffLines(oldStr, newStr);
-	let added = 0;
-	let removed = 0;
-
-	for (const change of changes) {
-		if (change.added) {
-			added += change.count || 0;
-		} else if (change.removed) {
-			removed += change.count || 0;
-		}
-	}
-
-	return { added, removed };
-}
-
-function mapFileSystemError(error: unknown): {
-	message: string;
-	code: ErrorCode;
-} {
-	const err = error as NodeJS.ErrnoException | undefined;
-	if (err?.code === "EACCES") {
-		return {
-			message: "Permission denied: cannot write to file",
-			code: ErrorCode.PERMISSION_DENIED,
-		};
-	} else if (err?.code === "ENOSPC") {
-		return { message: "No space left on device", code: ErrorCode.DISK_FULL };
-	} else if (err?.code === "EISDIR") {
-		return {
-			message: "Cannot write to directory: path is a directory",
-			code: ErrorCode.IS_DIRECTORY,
-		};
-	} else if (err?.code === "ENOTDIR") {
-		return {
-			message: "Parent path is not a directory",
-			code: ErrorCode.PARENT_NOT_DIRECTORY,
-		};
-	}
-	return {
-		message: err?.message ?? "Write operation failed",
-		code: ErrorCode.WRITE_FAILED,
-	};
+async function ensureParentDir(filePath: string) {
+	const dirName = path.dirname(filePath);
+	await fs.mkdir(dirName, { recursive: true });
 }
 
 export async function writeFileTool(input: WriteFileInput) {
-	const {
-		file_path,
-		content,
-		apply,
-		overwrite,
-		modified_by_user,
-		allow_ignored,
-	} = input;
+	const { file_path, content, modified_by_user, ai_proposed_content } = input;
 
-	// Workspace validation with friendlier error
 	let abs: string;
+	let root: string;
 	try {
-		abs = resolveWithinWorkspace(file_path);
-	} catch (_e) {
-		const msg = `Cannot write outside workspace: ${file_path}`;
+		({ absPath: abs, root } = resolveWithinWorkspace(file_path));
+	} catch (_e: unknown) {
+		const msg = `Path not in workspace: ${file_path}`;
 		return {
-			content: [{ type: "text" as const, text: msg }],
-			structuredContent: {
-				error: ErrorCode.OUTSIDE_WORKSPACE,
-				message: msg,
-			},
+			llmContent: msg,
+			returnDisplay: msg,
+			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
 		};
 	}
 
-	const relPosix = relativizePosix(abs);
+	const relPosix = relativizePosix(abs, root);
 	if (isSensitivePath(relPosix)) {
 		const msg = `Refusing to write sensitive path: ${relPosix}`;
 		return {
-			content: [{ type: "text" as const, text: msg }],
-			structuredContent: {
-				error: ErrorCode.SENSITIVE_PATH,
-				message: msg,
-				path: abs,
-				relativePath: relPosix,
-			},
+			llmContent: msg,
+			returnDisplay: msg,
+			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
 		};
 	}
 
-	// Respect .gitignore unless allow_ignored is true.
-	if (!allow_ignored) {
-		const ig = await buildIgnoreFilter({ respectGitIgnore: true });
-		if (ig.ignores(relPosix)) {
-			const msg = `Refusing to write ignored file: ${relPosix}`;
-			return {
-				content: [{ type: "text" as const, text: msg }],
-				structuredContent: {
-					error: ErrorCode.FILE_IGNORED,
-					message: msg,
-					path: abs,
-					relativePath: relPosix,
-				},
-			};
-		}
-	}
+	const { exists, content: originalContent } = await readIfExists(abs);
+	const isNewFile = !exists;
 
-	const { exists, content: current } = await readIfExists(abs);
-	if (exists === true && overwrite === false) {
+	try {
+		await ensureParentDir(abs);
+		await fs.writeFile(abs, content, "utf8");
+	} catch (error) {
+		const errorMsg = error instanceof Error ? error.message : String(error);
 		return {
-			content: [
-				{
-					type: "text" as const,
-					text: `File exists and overwrite=false: ${abs}`,
-				},
-			],
-			structuredContent: { error: ErrorCode.OVERWRITE_DISABLED },
+			llmContent: `Error writing to file: ${errorMsg}`,
+			returnDisplay: `Error writing to file: ${errorMsg}`,
+			error: { message: errorMsg, type: ToolErrorType.FILE_WRITE_FAILURE },
 		};
 	}
 
 	const fileName = path.basename(abs);
-	const diff = unifiedDiff(fileName, current, content);
-	const rel = relativize(abs);
+	const fileDiff = Diff.createPatch(
+		fileName,
+		originalContent,
+		content,
+		"Original",
+		"Written",
+		{ context: 3, ignoreWhitespace: false },
+	);
+	const diffStat = getDiffStat(
+		fileName,
+		originalContent,
+		ai_proposed_content ?? content,
+		content,
+	);
+	const displayResult = {
+		fileDiff,
+		fileName,
+		filePath: abs,
+		originalContent,
+		newContent: content,
+		diffStat,
+		isNewFile,
+	};
 
-	// Calculate diff statistics
-	const stats = getDiffStats(current, content);
-	const isNewFile = !exists;
-
-	// Create summary
-	const summary = isNewFile
-		? "Creating new file"
-		: `Modifying file: +${stats.added} -${stats.removed} lines`;
-
-	// Add note if modified by user
-	const userNote = modified_by_user ? " (user-modified content)" : "";
-
-	if (!apply) {
-		const previewText = `Diff preview for ${rel} (no changes written)${userNote}. To apply, call write_file with apply: true.\n\n${diff}`;
-		return {
-			content: [{ type: "text" as const, text: previewText }],
-			structuredContent: {
-				path: abs,
-				relativePath: relPosix,
-				applied: false,
-				diff,
-				summary: `${summary} (preview)`,
-				linesAdded: stats.added,
-				linesRemoved: stats.removed,
-				modifiedByUser: modified_by_user,
-			},
-		};
+	const llmSuccessMessageParts = [
+		isNewFile
+			? `Successfully created and wrote to new file: ${abs}.`
+			: `Successfully overwrote file: ${abs}.`,
+	];
+	if (modified_by_user) {
+		llmSuccessMessageParts.push(
+			`User modified the \`content\` to be: ${content}`,
+		);
 	}
 
-	try {
-		await fs.mkdir(path.dirname(abs), { recursive: true });
-		await fs.writeFile(abs, content, "utf8");
-	} catch (error) {
-		const errorInfo = mapFileSystemError(error);
-		return {
-			content: [
-				{
-					type: "text" as const,
-					text: `Failed to write file: ${errorInfo.message}`,
-				},
-			],
-			structuredContent: { error: errorInfo.code, message: errorInfo.message },
-		};
-	}
-
-	const resultText = `Wrote ${rel}${userNote}.\n\n${diff}`;
 	return {
-		content: [{ type: "text" as const, text: resultText }],
-		structuredContent: {
-			path: abs,
-			relativePath: relPosix,
-			applied: true,
-			diff,
-			summary: `${summary} (applied)`,
-			linesAdded: stats.added,
-			linesRemoved: stats.removed,
-			modifiedByUser: modified_by_user,
-		},
+		llmContent: llmSuccessMessageParts.join(" "),
+		returnDisplay: displayResult,
 	};
 }
