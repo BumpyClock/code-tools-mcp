@@ -1,4 +1,4 @@
 [mcp_servers.code-tools]
-command = "pnpm"
-args = [ "--silent","run","start" ]
+command = "bunx"
+args = [ "code-tools-mcp@latest" ]
 startup_timeout_sec = 40
