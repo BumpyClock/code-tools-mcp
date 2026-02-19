@@ -48,7 +48,6 @@ export async function lsTool(input: LsInput) {
 		const msg = e instanceof Error ? e.message : String(e);
 		return {
 			llmContent: msg,
-			returnDisplay: "Path not in workspace.",
 			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
 		};
 	}
@@ -58,7 +57,6 @@ export async function lsTool(input: LsInput) {
 		const msg = `Refusing to list sensitive path: ${relDirPosix}`;
 		return {
 			llmContent: msg,
-			returnDisplay: "Refused sensitive path.",
 			error: { message: msg, type: ToolErrorType.SENSITIVE_PATH },
 		};
 	}
@@ -68,7 +66,6 @@ export async function lsTool(input: LsInput) {
 		const msg = `Error: Directory not found or inaccessible: ${abs}`;
 		return {
 			llmContent: msg,
-			returnDisplay: "Directory not found or inaccessible.",
 			error: { message: msg, type: ToolErrorType.FILE_NOT_FOUND },
 		};
 	}
@@ -76,7 +73,6 @@ export async function lsTool(input: LsInput) {
 		const msg = `Error: Path is not a directory: ${abs}`;
 		return {
 			llmContent: msg,
-			returnDisplay: "Path is not a directory.",
 			error: { message: msg, type: ToolErrorType.PATH_IS_NOT_A_DIRECTORY },
 		};
 	}
@@ -100,7 +96,6 @@ export async function lsTool(input: LsInput) {
 		const msg = `Error listing directory: ${error instanceof Error ? error.message : String(error)}`;
 		return {
 			llmContent: msg,
-			returnDisplay: "Failed to list directory.",
 			error: { message: msg, type: ToolErrorType.LS_EXECUTION_ERROR },
 		};
 	}
@@ -147,13 +142,7 @@ export async function lsTool(input: LsInput) {
 		resultMessage += `\n\n(${gitIgnoredCount} ignored)`;
 	}
 
-	let displayMessage = `Listed ${entries.length} item(s).`;
-	if (gitIgnoredCount > 0) {
-		displayMessage += ` (${gitIgnoredCount} ignored)`;
-	}
-
 	return {
 		llmContent: resultMessage,
-		returnDisplay: displayMessage,
 	};
 }

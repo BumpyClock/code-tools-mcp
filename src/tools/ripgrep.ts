@@ -269,7 +269,6 @@ export async function searchFileContentTool(
 		const msg = e instanceof Error ? e.message : String(e);
 		return {
 			llmContent: msg,
-			returnDisplay: "Error: Path not in workspace.",
 			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
 		};
 	}
@@ -282,14 +281,12 @@ export async function searchFileContentTool(
 		const msg = `Path does not exist: ${searchAbs}`;
 		return {
 			llmContent: msg,
-			returnDisplay: "Error: Path does not exist.",
 			error: { message: msg, type: ToolErrorType.FILE_NOT_FOUND },
 		};
 	}
 	if (!stats.isDirectory() && !stats.isFile()) {
 		return {
 			llmContent: `Path is not a valid directory or file: ${searchAbs}`,
-			returnDisplay: "Error: Path is not a valid directory or file.",
 		};
 	}
 
@@ -400,7 +397,7 @@ export async function searchFileContentTool(
 	if (matches.length === 0) {
 		const filterNote = input.include ? ` (filter: "${input.include}")` : "";
 		const noMatchMsg = `No matches found for pattern "${input.pattern}" ${searchLocationDescription}${filterNote}.`;
-		return { llmContent: noMatchMsg, returnDisplay: "No matches found" };
+		return { llmContent: noMatchMsg };
 	}
 
 	const matchesByFile = matches.reduce<Record<string, GrepMatch[]>>(
@@ -427,6 +424,5 @@ export async function searchFileContentTool(
 
 	return {
 		llmContent: llmContent.trim(),
-		returnDisplay: `Found ${matchCount} ${matchTerm}${wasTruncated ? " (limited)" : ""}`,
 	};
 }

@@ -1,4 +1,4 @@
-// ABOUTME: Gemini CLI-compatible tool result schema for structured outputs.
+// ABOUTME: MCP tool result schema for structured outputs.
 
 import { z } from "zod";
 import { ToolErrorType } from "./tool-error-type.js";
@@ -28,7 +28,6 @@ export const toolErrorShape = z.object({
 
 export const toolResultShape = {
 	llmContent: z.union([z.string(), z.array(toolContentShape)]).optional(),
-	returnDisplay: z.unknown().optional(),
 	error: toolErrorShape.optional(),
 };
 

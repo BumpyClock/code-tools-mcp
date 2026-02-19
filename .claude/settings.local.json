@@ -17,7 +17,8 @@
 			"mcp__code-tools__ripgrep",
 			"mcp__code-tools__glob",
 			"mcp__code-tools__search_file_content",
-			"mcp__code-tools__replace"
+			"mcp__code-tools__replace",
+			"Bash(npx tsc:*)"
 		],
 		"deny": [],
 		"ask": []

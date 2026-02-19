@@ -1,4 +1,4 @@
-// ABOUTME: Gemini CLI-compatible tool error types for structured tool results.
+// ABOUTME: Standardized tool error types for structured tool results.
 
 export enum ToolErrorType {
 	POLICY_VIOLATION = "policy_violation",
@@ -28,14 +28,5 @@ export enum ToolErrorType {
 	GREP_EXECUTION_ERROR = "grep_execution_error",
 	LS_EXECUTION_ERROR = "ls_execution_error",
 	PATH_IS_NOT_A_DIRECTORY = "path_is_not_a_directory",
-	MCP_TOOL_ERROR = "mcp_tool_error",
-	MEMORY_TOOL_EXECUTION_ERROR = "memory_tool_execution_error",
 	READ_MANY_FILES_SEARCH_ERROR = "read_many_files_search_error",
-	SHELL_EXECUTE_ERROR = "shell_execute_error",
-	DISCOVERED_TOOL_EXECUTION_ERROR = "discovered_tool_execution_error",
-	WEB_FETCH_NO_URL_IN_PROMPT = "web_fetch_no_url_in_prompt",
-	WEB_FETCH_FALLBACK_FAILED = "web_fetch_fallback_failed",
-	WEB_FETCH_PROCESSING_ERROR = "web_fetch_processing_error",
-	WEB_SEARCH_FAILED = "web_search_failed",
-	STOP_EXECUTION = "stop_execution",
 }

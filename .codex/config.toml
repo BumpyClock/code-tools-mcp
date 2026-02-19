@@ -1,0 +1,4 @@
+[mcp_servers.code-tools]
+command = "pnpm"
+args = [ "--silent","run","start" ]
+startup_timeout_sec = 40

@@ -88,7 +88,6 @@ export async function readFileTool(input: ReadFileInput) {
 		const msg = e instanceof Error ? e.message : String(e);
 		return {
 			llmContent: msg,
-			returnDisplay: "Path not in workspace.",
 			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
 		};
 	}
@@ -98,7 +97,6 @@ export async function readFileTool(input: ReadFileInput) {
 		const msg = `Refusing to read sensitive path: ${relPosix}`;
 		return {
 			llmContent: msg,
-			returnDisplay: "Refused sensitive path.",
 			error: { message: msg, type: ToolErrorType.SENSITIVE_PATH },
 		};
 	}
@@ -108,7 +106,6 @@ export async function readFileTool(input: ReadFileInput) {
 		const msg = `File not found or not a file: ${abs}`;
 		return {
 			llmContent: msg,
-			returnDisplay: "File not found.",
 			error: { message: msg, type: ToolErrorType.FILE_NOT_FOUND },
 		};
 	}
@@ -118,7 +115,6 @@ export async function readFileTool(input: ReadFileInput) {
 		const msg = `File path '${abs}' is ignored by configured ignore patterns.`;
 		return {
 			llmContent: msg,
-			returnDisplay: "Path ignored.",
 			error: { message: msg, type: ToolErrorType.INVALID_TOOL_PARAMS },
 		};
 	}
@@ -132,7 +128,6 @@ export async function readFileTool(input: ReadFileInput) {
 			const msg = `File too large to read: ${abs}`;
 			return {
 				llmContent: msg,
-				returnDisplay: "File too large.",
 				error: { message: msg, type: ToolErrorType.FILE_TOO_LARGE },
 			};
 		}
@@ -140,7 +135,6 @@ export async function readFileTool(input: ReadFileInput) {
 		const part = mapBinaryPart(mimeType, buf.toString("base64"));
 		return {
 			llmContent: [part],
-			returnDisplay: `Read file ${abs}.`,
 		};
 	}
 
@@ -158,7 +152,6 @@ export async function readFileTool(input: ReadFileInput) {
 		const msg = `File is binary or unsupported: ${abs}`;
 		return {
 			llmContent: msg,
-			returnDisplay: "Unsupported file type.",
 			error: { message: msg, type: ToolErrorType.READ_CONTENT_FAILURE },
 		};
 	}
@@ -173,7 +166,6 @@ export async function readFileTool(input: ReadFileInput) {
 		const text = fullBuf ? fullBuf.toString("utf8") : "";
 		return {
 			llmContent: text,
-			returnDisplay: "Read file.",
 		};
 	}
 
@@ -212,12 +204,10 @@ export async function readFileTool(input: ReadFileInput) {
 				totalLines,
 				nextOffset,
 			),
-			returnDisplay: "Read file (truncated).",
 		};
 	}
 
 	return {
 		llmContent: content,
-		returnDisplay: "Read file.",
 	};
 }

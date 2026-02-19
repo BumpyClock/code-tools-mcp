@@ -121,7 +121,6 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 		return {
 			llmContent:
 				"No files matching the criteria were found or all were skipped.",
-			returnDisplay: "No files were read.",
 		};
 	}
 
@@ -226,37 +225,6 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 		processedFilesRelativePaths.push(relativizePosix(abs, primaryRoot));
 	}
 
-	let displayMessage = `### ReadManyFiles Result (Target Dir: \`${primaryRoot}\`)\n\n`;
-	if (processedFilesRelativePaths.length > 0) {
-		displayMessage += `Successfully read and concatenated content from **${processedFilesRelativePaths.length} file(s)**.\n`;
-		const slice = processedFilesRelativePaths.slice(0, 10);
-		if (slice.length > 0) {
-			displayMessage += `\n**Processed Files${processedFilesRelativePaths.length > 10 ? " (first 10 shown)" : ""}:**\n`;
-			for (const p of slice) {
-				displayMessage += `- \`${p}\`\n`;
-			}
-			if (processedFilesRelativePaths.length > 10) {
-				displayMessage += `- ...and ${processedFilesRelativePaths.length - 10} more.\n`;
-			}
-		}
-	}
-
-	if (skippedFiles.length > 0) {
-		if (processedFilesRelativePaths.length === 0) {
-			displayMessage += "No files were read and concatenated based on the criteria.\n";
-		}
-		const slice = skippedFiles.slice(0, 5);
-		displayMessage += `\n**Skipped ${skippedFiles.length} item(s)${
-			skippedFiles.length > 5 ? " (first 5 shown)" : ""
-		}:**\n`;
-		for (const f of slice) {
-			displayMessage += `- \`${f.path}\` (Reason: ${f.reason})\n`;
-		}
-		if (skippedFiles.length > 5) {
-			displayMessage += `- ...and ${skippedFiles.length - 5} more.\n`;
-		}
-	}
-
 	if (contentParts.length > 0) {
 		contentParts.push({ type: "text", text: DEFAULT_OUTPUT_TERMINATOR });
 	} else {
@@ -268,6 +236,5 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 
 	return {
 		llmContent: contentParts,
-		returnDisplay: displayMessage.trim(),
 	};
 }

@@ -1,9 +1,8 @@
 // ABOUTME: Replaces text within a file using exact literal matching.
-// ABOUTME: Returns a diff-like display object in Gemini CLI style.
+// ABOUTME: Returns a success/error message for the replacement operation.
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import * as Diff from "diff";
 import { z } from "zod";
 import { ToolErrorType } from "../types/tool-error-type.js";
 import { toolResultShape } from "../types/tool-result.js";
@@ -33,83 +32,11 @@ export const editShape = {
 		.min(1)
 		.optional()
 		.describe("Number of replacements expected."),
-	modified_by_user: z.boolean().optional(),
-	ai_proposed_content: z.string().optional(),
 };
 export const editInput = z.object(editShape);
 export type EditInput = z.infer<typeof editInput>;
 
 export const editOutputShape = toolResultShape;
-
-interface DiffStat {
-	model_added_lines: number;
-	model_removed_lines: number;
-	model_added_chars: number;
-	model_removed_chars: number;
-	user_added_lines: number;
-	user_removed_lines: number;
-	user_added_chars: number;
-	user_removed_chars: number;
-}
-
-function getDiffStat(
-	fileName: string,
-	oldStr: string,
-	aiStr: string,
-	userStr: string,
-): DiffStat {
-	const getStats = (patch: Diff.StructuredPatch) => {
-		let addedLines = 0;
-		let removedLines = 0;
-		let addedChars = 0;
-		let removedChars = 0;
-		for (const hunk of patch.hunks) {
-			for (const line of hunk.lines) {
-				if (line.startsWith("+")) {
-					addedLines++;
-					addedChars += line.length - 1;
-				} else if (line.startsWith("-")) {
-					removedLines++;
-					removedChars += line.length - 1;
-				}
-			}
-		}
-		return { addedLines, removedLines, addedChars, removedChars };
-	};
-
-	const modelPatch = Diff.structuredPatch(
-		fileName,
-		fileName,
-		oldStr,
-		aiStr,
-		"Current",
-		"Proposed",
-		{ context: 3, ignoreWhitespace: false },
-	);
-	const modelStats = getStats(modelPatch);
-
-	const userPatch = Diff.structuredPatch(
-		fileName,
-		fileName,
-		aiStr,
-		userStr,
-		"Proposed",
-		"User",
-		{ context: 3, ignoreWhitespace: false },
-	);
-	const userStats = getStats(userPatch);
-
-	return {
-		model_added_lines: modelStats.addedLines,
-		model_removed_lines: modelStats.removedLines,
-		model_added_chars: modelStats.addedChars,
-		model_removed_chars: modelStats.removedChars,
-		user_added_lines: userStats.addedLines,
-		user_removed_lines: userStats.removedLines,
-		user_added_chars: userStats.addedChars,
-		user_removed_chars: userStats.removedChars,
-	};
-}
 
 function countOccurrences(haystack: string, needle: string): number {
 	if (needle === "") return 0;
@@ -153,14 +80,7 @@ async function ensureParentDir(filePath: string) {
 }
 
 export async function editTool(input: EditInput) {
-	const {
-		file_path,
-		old_string,
-		new_string,
-		expected_replacements,
-		modified_by_user,
-		ai_proposed_content,
-	} = input;
+	const { file_path, old_string, new_string, expected_replacements } = input;
 
 	let abs: string;
 	let root: string;
@@ -170,7 +90,6 @@ export async function editTool(input: EditInput) {
 		const msg = e instanceof Error ? e.message : String(e);
 		return {
 			llmContent: msg,
-			returnDisplay: "Error: Path not in workspace.",
 			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
 		};
 	}
@@ -180,7 +99,6 @@ export async function editTool(input: EditInput) {
 		const msg = `Refusing to edit sensitive path: ${relPosix}`;
 		return {
 			llmContent: msg,
-			returnDisplay: "Error: Sensitive path.",
 			error: { message: msg, type: ToolErrorType.SENSITIVE_PATH },
 		};
 	}
@@ -202,7 +120,6 @@ export async function editTool(input: EditInput) {
 		const msg = `Error: No occurrence of old_string found in ${abs}`;
 		return {
 			llmContent: msg,
-			returnDisplay: `Error: ${msg}`,
 			error: { message: msg, type: ToolErrorType.EDIT_NO_OCCURRENCE_FOUND },
 		};
 	}
@@ -219,7 +136,6 @@ export async function editTool(input: EditInput) {
 			const msg = `Error: No occurrence of old_string found in ${abs}`;
 			return {
 				llmContent: msg,
-				returnDisplay: `Error: ${msg}`,
 				error: { message: msg, type: ToolErrorType.EDIT_NO_OCCURRENCE_FOUND },
 			};
 		}
@@ -230,7 +146,6 @@ export async function editTool(input: EditInput) {
 			const msg = `Error: Expected ${expected_replacements} occurrences but found ${occurrences} in ${abs}`;
 			return {
 				llmContent: msg,
-				returnDisplay: `Error: ${msg}`,
 				error: {
 					message: msg,
 					type: ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
@@ -243,7 +158,6 @@ export async function editTool(input: EditInput) {
 		const msg = "No changes to apply: old_string and new_string are identical.";
 		return {
 			llmContent: msg,
-			returnDisplay: "Error: No changes.",
 			error: { message: msg, type: ToolErrorType.EDIT_NO_CHANGE },
 		};
 	}
@@ -256,49 +170,13 @@ export async function editTool(input: EditInput) {
 		const errorMsg = error instanceof Error ? error.message : String(error);
 		return {
 			llmContent: `Error executing edit: ${errorMsg}`,
-			returnDisplay: `Error writing file: ${errorMsg}`,
 			error: { message: errorMsg, type: ToolErrorType.FILE_WRITE_FAILURE },
 		};
 	}
 
-	const fileName = path.basename(abs);
-	const fileDiff = Diff.createPatch(
-		fileName,
-		current ?? "",
-		newContent,
-		"Current",
-		"Proposed",
-		{ context: 3, ignoreWhitespace: false },
-	);
-	const diffStat = getDiffStat(
-		fileName,
-		current ?? "",
-		ai_proposed_content ?? newContent,
-		newContent,
-	);
-	const displayResult = {
-		fileDiff,
-		fileName,
-		filePath: abs,
-		originalContent: current,
-		newContent,
-		diffStat,
-		isNewFile,
-	};
+	const successMessage = isNewFile
+		? `Created new file: ${abs} with provided content.`
+		: `Successfully modified file: ${abs} (${occurrences} replacements).`;
 
-	const llmSuccessMessageParts = [
-		isNewFile
-			? `Created new file: ${abs} with provided content.`
-			: `Successfully modified file: ${abs} (${occurrences} replacements).`,
-	];
-	if (modified_by_user) {
-		llmSuccessMessageParts.push(
-			`User modified the \`new_string\` content to be: ${new_string}.`,
-		);
-	}
-
-	return {
-		llmContent: llmSuccessMessageParts.join(" "),
-		returnDisplay: displayResult,
-	};
+	return { llmContent: successMessage };
 }

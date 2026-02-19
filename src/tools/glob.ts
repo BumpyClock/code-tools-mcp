@@ -103,7 +103,6 @@ export async function globTool(input: GlobInput, _signal?: AbortSignal) {
 			const msg = e instanceof Error ? e.message : String(e);
 			return {
 				llmContent: msg,
-				returnDisplay: "Path not in workspace.",
 				error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
 			};
 		}
@@ -119,7 +118,6 @@ export async function globTool(input: GlobInput, _signal?: AbortSignal) {
 		if (!st) {
 			return {
 				llmContent: `Search path does not exist ${target.dir}`,
-				returnDisplay: "Path not found.",
 				error: {
 					message: `Search path does not exist ${target.dir}`,
 					type: ToolErrorType.SEARCH_PATH_NOT_FOUND,
@@ -129,7 +127,6 @@ export async function globTool(input: GlobInput, _signal?: AbortSignal) {
 		if (!st.isDirectory()) {
 			return {
 				llmContent: `Search path is not a directory: ${target.dir}`,
-				returnDisplay: "Path is not a directory.",
 				error: {
 					message: `Search path is not a directory: ${target.dir}`,
 					type: ToolErrorType.SEARCH_PATH_NOT_A_DIRECTORY,
@@ -173,7 +170,6 @@ export async function globTool(input: GlobInput, _signal?: AbortSignal) {
 		}
 		return {
 			llmContent: message,
-			returnDisplay: "No files found",
 		};
 	}
 
@@ -196,6 +192,5 @@ export async function globTool(input: GlobInput, _signal?: AbortSignal) {
 
 	return {
 		llmContent: resultMessage,
-		returnDisplay: `Found ${fileCount} matching file(s)`,
 	};
 }

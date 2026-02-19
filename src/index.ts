@@ -48,9 +48,8 @@ import {
 } from "./tools/write-file.js";
 import type { ToolContent, ToolError } from "./types/tool-result.js";
 
-type GeminiToolResult = {
+type ToolOutput = {
 	llmContent?: string | ToolContent[];
-	returnDisplay?: unknown;
 	error?: ToolError;
 };
 
@@ -90,10 +89,10 @@ function toContent(llmContent?: string | ToolContent[]): McpContent[] {
 	});
 }
 
-function wrapResult(result: GeminiToolResult) {
+function wrapResult(result: ToolOutput) {
 	return {
 		content: toContent(result.llmContent),
-		structuredContent: result,
+		isError: !!result.error,
 	};
 }
 
