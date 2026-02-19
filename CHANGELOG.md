@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 1.1.0 - 2026-02-19
 - Deprecated: `ripgrep` tool name; use `search_file_content` (alias retained for backward compatibility).
 - Fixed: `read_file` paged reads now report accurate total line counts in truncation metadata.
 - Changed: unified path policy across tools; sensitive and git-ignored paths are blocked consistently by default.

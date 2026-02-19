@@ -7,6 +7,8 @@ Codex CLI on Windows has limitations because it relies on writing PowerShell/Pyt
 
 This is without warranty, any issues or bugs should be reported to the repository but be aware of the risks and use it at your own risk.
 
+Release notes are tracked in `CHANGELOG.md`.
+
 **Install**
 
 - Global: `npm i -g code-tools-mcp`
