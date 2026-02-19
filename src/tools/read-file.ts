@@ -15,12 +15,7 @@ import {
 	MAX_BINARY_BYTES,
 	mapBinaryPart,
 } from "../utils/file-content.js";
-import { buildIgnoreFilter } from "../utils/ignore.js";
-import {
-	isSensitivePath,
-	relativizePosix,
-	resolveWithinWorkspace,
-} from "../utils/workspace.js";
+import { resolvePathAccess } from "../utils/path-policy.js";
 
 const MAX_FULL_READ_BYTES = 2 * 1024 * 1024;
 const SNIFF_BYTES = 8192;
@@ -30,6 +25,20 @@ export const readFileShape = {
 	file_path: z
 		.string()
 		.describe("The path to the file to read (absolute or workspace-relative)."),
+	no_ignore: z
+		.boolean()
+		.optional()
+		.describe("If true, do not respect gitignore filtering for this path."),
+	respect_git_ignore: z
+		.boolean()
+		.optional()
+		.describe("If false, do not respect gitignore filtering for this path."),
+	file_filtering_options: z
+		.object({
+			respect_git_ignore: z.boolean().optional(),
+			respect_gemini_ignore: z.boolean().optional(),
+		})
+		.optional(),
 	offset: z
 		.number()
 		.int()
@@ -67,39 +76,29 @@ function buildTruncatedMessage(
 	total: number,
 	nextOffset: number,
 ): string {
-	const lines = [
-		"IMPORTANT: The file content has been truncated.",
-		`Status: Showing lines ${start}-${end} of ${total} total lines.`,
-		`Action: To read more of the file, you can use the 'offset' and 'limit' parameters in a subsequent 'read_file' call. For example, to read the next section of the file, use offset: ${nextOffset}.`,
-		"",
-		"--- FILE CONTENT (truncated) ---",
-		content,
-	];
-	return lines.join("\n");
+	return `TRUNCATED ${start}-${end}/${total}; next_offset=${nextOffset}\n${content}`;
 }
 
 export async function readFileTool(input: ReadFileInput) {
-	const { file_path, offset, limit } = input;
-	let abs: string;
-	let root: string;
-	try {
-		({ absPath: abs, root } = resolveWithinWorkspace(file_path));
-	} catch (e: unknown) {
-		const msg = e instanceof Error ? e.message : String(e);
+	const {
+		file_path,
+		no_ignore,
+		respect_git_ignore,
+		file_filtering_options,
+		offset,
+		limit,
+	} = input;
+	const access = await resolvePathAccess(file_path, {
+		action: "read",
+		filtering: { no_ignore, respect_git_ignore, file_filtering_options },
+	});
+	if (!access.ok) {
 		return {
-			llmContent: msg,
-			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
+			llmContent: access.llmContent,
+			error: access.error,
 		};
 	}
-
-	const relPosix = relativizePosix(abs, root);
-	if (isSensitivePath(relPosix)) {
-		const msg = `Refusing to read sensitive path: ${relPosix}`;
-		return {
-			llmContent: msg,
-			error: { message: msg, type: ToolErrorType.SENSITIVE_PATH },
-		};
-	}
+	const abs = access.absPath;
 
 	const st = await fs.stat(abs).catch(() => null);
 	if (!st || !st.isFile()) {
@@ -107,15 +106,6 @@ export async function readFileTool(input: ReadFileInput) {
 		return {
 			llmContent: msg,
 			error: { message: msg, type: ToolErrorType.FILE_NOT_FOUND },
-		};
-	}
-
-	const ig = await buildIgnoreFilter({ respectGitIgnore: true }, root);
-	if (ig.ignores(relPosix)) {
-		const msg = `File path '${abs}' is ignored by configured ignore patterns.`;
-		return {
-			llmContent: msg,
-			error: { message: msg, type: ToolErrorType.INVALID_TOOL_PARAMS },
 		};
 	}
 
@@ -175,7 +165,6 @@ export async function readFileTool(input: ReadFileInput) {
 	const collected: string[] = [];
 	let lineCount = 0;
 	const startLine = lineOffset + 1;
-	let endLine = lineOffset;
 	let truncated = false;
 
 	for await (const line of rl) {
@@ -184,18 +173,16 @@ export async function readFileTool(input: ReadFileInput) {
 		if (currentLine < lineOffset) continue;
 		if (lineLimit !== undefined && collected.length >= lineLimit) {
 			truncated = true;
-			endLine = lineOffset + collected.length;
-			rl.close();
-			break;
+			continue;
 		}
 		collected.push(line);
-		endLine = lineOffset + collected.length;
 	}
 
 	const content = collected.join("\n");
+	const endLine = lineOffset + collected.length;
 	if (truncated) {
 		const nextOffset = lineOffset + collected.length;
-		const totalLines = lineOffset + collected.length;
+		const totalLines = lineCount;
 		return {
 			llmContent: buildTruncatedMessage(
 				content,

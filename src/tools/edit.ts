@@ -6,11 +6,7 @@ import path from "node:path";
 import { z } from "zod";
 import { ToolErrorType } from "../types/tool-error-type.js";
 import { toolResultShape } from "../types/tool-result.js";
-import {
-	isSensitivePath,
-	relativizePosix,
-	resolveWithinWorkspace,
-} from "../utils/workspace.js";
+import { resolvePathAccess } from "../utils/path-policy.js";
 
 export const editShape = {
 	file_path: z
@@ -18,6 +14,20 @@ export const editShape = {
 		.describe(
 			"The path to the file to modify (absolute or workspace-relative).",
 		),
+	no_ignore: z
+		.boolean()
+		.optional()
+		.describe("If true, do not respect gitignore filtering for this path."),
+	respect_git_ignore: z
+		.boolean()
+		.optional()
+		.describe("If false, do not respect gitignore filtering for this path."),
+	file_filtering_options: z
+		.object({
+			respect_git_ignore: z.boolean().optional(),
+			respect_gemini_ignore: z.boolean().optional(),
+		})
+		.optional(),
 	instruction: z
 		.string()
 		.optional()
@@ -80,28 +90,26 @@ async function ensureParentDir(filePath: string) {
 }
 
 export async function editTool(input: EditInput) {
-	const { file_path, old_string, new_string, expected_replacements } = input;
-
-	let abs: string;
-	let root: string;
-	try {
-		({ absPath: abs, root } = resolveWithinWorkspace(file_path));
-	} catch (e: unknown) {
-		const msg = e instanceof Error ? e.message : String(e);
+	const {
+		file_path,
+		no_ignore,
+		respect_git_ignore,
+		file_filtering_options,
+		old_string,
+		new_string,
+		expected_replacements,
+	} = input;
+	const access = await resolvePathAccess(file_path, {
+		action: "edit",
+		filtering: { no_ignore, respect_git_ignore, file_filtering_options },
+	});
+	if (!access.ok) {
 		return {
-			llmContent: msg,
-			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
+			llmContent: access.llmContent,
+			error: access.error,
 		};
 	}
-
-	const relPosix = relativizePosix(abs, root);
-	if (isSensitivePath(relPosix)) {
-		const msg = `Refusing to edit sensitive path: ${relPosix}`;
-		return {
-			llmContent: msg,
-			error: { message: msg, type: ToolErrorType.SENSITIVE_PATH },
-		};
-	}
+	const abs = access.absPath;
 
 	let current: string | null = null;
 	let exists = false;

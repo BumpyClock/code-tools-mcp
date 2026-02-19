@@ -9,15 +9,17 @@ import fg from "fast-glob";
 import { z } from "zod";
 import { ToolErrorType } from "../types/tool-error-type.js";
 import { toolResultShape } from "../types/tool-result.js";
-import { buildIgnoreFilter } from "../utils/ignore.js";
-import { ensureDir, fileExists, getGlobalBinDir } from "../utils/storage.js";
 import {
-	isSensitivePath,
-	resolveWithinWorkspace,
-	toPosixPath,
-} from "../utils/workspace.js";
+	getPathPolicyBlockReason,
+	type getPolicyContextForRoot,
+	resolvePathAccess,
+	resolveRespectGitIgnore,
+} from "../utils/path-policy.js";
+import { ensureDir, fileExists, getGlobalBinDir } from "../utils/storage.js";
+import { toPosixPath } from "../utils/workspace.js";
 
 const DEFAULT_MAX_MATCHES = 20000;
+const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_EXCLUDES = [
 	"**/{node_modules,.git,dist,build,out}/**",
@@ -66,6 +68,28 @@ export const searchFileContentShape = {
 		.boolean()
 		.optional()
 		.describe("If true, do not respect ignore files or defaults."),
+	respect_git_ignore: z
+		.boolean()
+		.optional()
+		.describe("If false, do not respect ignore files or defaults."),
+	file_filtering_options: z
+		.object({
+			respect_git_ignore: z.boolean().optional(),
+			respect_gemini_ignore: z.boolean().optional(),
+		})
+		.optional(),
+	max_matches: z
+		.number()
+		.int()
+		.min(1)
+		.optional()
+		.describe("Optional maximum number of matches to return."),
+	max_output_bytes: z
+		.number()
+		.int()
+		.min(1)
+		.optional()
+		.describe("Optional maximum output size in bytes."),
 };
 export const searchFileContentInput = z.object(searchFileContentShape);
 export type SearchFileContentInput = z.infer<typeof searchFileContentInput>;
@@ -196,6 +220,9 @@ async function fallbackSearch(
 	input: SearchFileContentInput,
 	searchPath: string,
 	maxMatches: number,
+	respectGitIgnore: boolean,
+	root: string,
+	policy: Awaited<ReturnType<typeof getPolicyContextForRoot>>,
 	signal?: AbortSignal,
 	targetFile?: string,
 ): Promise<GrepMatch[]> {
@@ -203,10 +230,7 @@ async function fallbackSearch(
 	const caseSensitive = input.case_sensitive === true;
 	const fixedStrings = input.fixed_strings === true;
 	const includePattern = input.include ?? "**/*";
-	const ignore = input.no_ignore ? [] : DEFAULT_EXCLUDES;
-	const ig = input.no_ignore
-		? null
-		: await buildIgnoreFilter({ respectGitIgnore: true }, searchPath);
+	const ignore = respectGitIgnore ? DEFAULT_EXCLUDES : [];
 
 	const entries = targetFile
 		? [targetFile]
@@ -236,9 +260,10 @@ async function fallbackSearch(
 
 	for (const absFile of entries) {
 		if (signal?.aborted) break;
-		const rel = toPosixPath(path.relative(searchPath, absFile));
-		if (isSensitivePath(rel)) continue;
-		if (ig?.ignores(rel)) continue;
+		const relToRoot = toPosixPath(path.relative(root, absFile));
+		if (getPathPolicyBlockReason(relToRoot, policy)) continue;
+		const relToSearch =
+			toPosixPath(path.relative(searchPath, absFile)) || path.basename(absFile);
 		const text = await fs.readFile(absFile, "utf8").catch(() => null);
 		if (text === null) continue;
 		const lines = text.split(/\r?\n/);
@@ -249,7 +274,11 @@ async function fallbackSearch(
 				? line.includes(pattern)
 				: (regex?.test(line) ?? false);
 			if (!matched) continue;
-			results.push({ filePath: rel, lineNumber: i + 1, line: line.trimEnd() });
+			results.push({
+				filePath: relToSearch,
+				lineNumber: i + 1,
+				line: line.trimEnd(),
+			});
 			if (results.length >= maxMatches) return results;
 		}
 	}
@@ -257,23 +286,64 @@ async function fallbackSearch(
 	return results;
 }
 
+function formatCompactMatchesOutput(
+	matches: GrepMatch[],
+	options: {
+		maxMatches: number;
+		matchTruncated: boolean;
+		maxOutputBytes: number;
+	},
+): string {
+	const sorted = [...matches].sort((a, b) => {
+		const fileCmp = a.filePath.localeCompare(b.filePath);
+		if (fileCmp !== 0) return fileCmp;
+		return a.lineNumber - b.lineNumber;
+	});
+	const lines: string[] = [`matches=${sorted.length}`];
+	let bytes = Buffer.byteLength(`${lines[0]}\n`, "utf8");
+	let outputTruncated = false;
+
+	for (const match of sorted) {
+		const line = `${match.filePath}:${match.lineNumber}:${match.line.trim()}`;
+		const lineBytes = Buffer.byteLength(`${line}\n`, "utf8");
+		if (bytes + lineBytes > options.maxOutputBytes) {
+			outputTruncated = true;
+			break;
+		}
+		lines.push(line);
+		bytes += lineBytes;
+	}
+
+	if (options.matchTruncated) {
+		lines.push(`truncated=max_matches:${options.maxMatches}`);
+	}
+	if (outputTruncated) {
+		lines.push(`truncated=max_output_bytes:${options.maxOutputBytes}`);
+	}
+	return lines.join("\n");
+}
+
 export async function searchFileContentTool(
 	input: SearchFileContentInput,
 	signal?: AbortSignal,
 ) {
 	const pathParam = input.dir_path ?? ".";
-	let resolved: { absPath: string; root: string };
-	try {
-		resolved = resolveWithinWorkspace(pathParam);
-	} catch (e: unknown) {
-		const msg = e instanceof Error ? e.message : String(e);
+	let respectGitIgnore = resolveRespectGitIgnore(input);
+	const maxMatches = input.max_matches ?? DEFAULT_MAX_MATCHES;
+	const maxOutputBytes = input.max_output_bytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+	const access = await resolvePathAccess(pathParam, {
+		action: "search",
+		filtering: input,
+	});
+	if (!access.ok) {
 		return {
-			llmContent: msg,
-			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
+			llmContent: access.llmContent,
+			error: access.error,
 		};
 	}
+	respectGitIgnore = access.policy.respectGitIgnore;
 
-	const searchAbs = resolved.absPath;
+	const searchAbs = access.absPath;
 	let stats: Awaited<ReturnType<typeof fs.stat>> | undefined;
 	try {
 		stats = await fs.stat(searchAbs);
@@ -285,14 +355,14 @@ export async function searchFileContentTool(
 		};
 	}
 	if (!stats.isDirectory() && !stats.isFile()) {
+		const msg = `Path is not a valid directory or file: ${searchAbs}`;
 		return {
-			llmContent: `Path is not a valid directory or file: ${searchAbs}`,
+			llmContent: msg,
+			error: { message: msg, type: ToolErrorType.SEARCH_PATH_NOT_A_DIRECTORY },
 		};
 	}
 
 	const searchDir = stats.isFile() ? path.dirname(searchAbs) : searchAbs;
-	const searchLocationDescription = `in path "${pathParam}"`;
-	const maxMatches = DEFAULT_MAX_MATCHES;
 	const timeoutController = new AbortController();
 	const timeoutId = setTimeout(
 		() => timeoutController.abort(),
@@ -308,7 +378,6 @@ export async function searchFileContentTool(
 
 	let matches: GrepMatch[] = [];
 	let wasTruncated = false;
-	let usedRipgrep = false;
 
 	let rgCmd: string | null = null;
 	if (await haveRgOnPath()) {
@@ -318,7 +387,6 @@ export async function searchFileContentTool(
 	}
 
 	if (rgCmd) {
-		usedRipgrep = true;
 		const args: string[] = ["--json"];
 		if (!input.case_sensitive) args.push("--ignore-case");
 		if (input.fixed_strings) {
@@ -335,13 +403,13 @@ export async function searchFileContentTool(
 		if (input.before !== undefined) {
 			args.push("--before-context", input.before.toString());
 		}
-		if (input.no_ignore) {
+		if (!respectGitIgnore) {
 			args.push("--no-ignore");
 		}
 		if (input.include) {
 			args.push("--glob", input.include);
 		}
-		if (!input.no_ignore) {
+		if (respectGitIgnore) {
 			for (const exclude of DEFAULT_EXCLUDES) {
 				args.push("--glob", `!${exclude}`);
 			}
@@ -370,6 +438,9 @@ export async function searchFileContentTool(
 			input,
 			searchDir,
 			maxMatches,
+			respectGitIgnore,
+			access.root,
+			access.policy,
 			combinedController.signal,
 			stats.isFile() ? searchAbs : undefined,
 		);
@@ -380,49 +451,25 @@ export async function searchFileContentTool(
 	if (signal) signal.removeEventListener("abort", onAbort);
 	timeoutController.signal.removeEventListener("abort", onAbort);
 
-	if (!usedRipgrep && !input.no_ignore) {
-		const ig = await buildIgnoreFilter(
-			{ respectGitIgnore: true },
-			resolved.root,
-		);
-		matches = matches.filter((match) => {
-			const absFile = path.resolve(searchDir, match.filePath);
-			const relToRoot = toPosixPath(path.relative(resolved.root, absFile));
-			if (isSensitivePath(relToRoot)) return false;
-			if (ig.ignores(relToRoot)) return false;
-			return true;
-		});
-	}
+	matches = matches.filter((match) => {
+		const absFile = path.resolve(searchDir, match.filePath);
+		const relToRoot = toPosixPath(path.relative(access.root, absFile));
+		return !getPathPolicyBlockReason(relToRoot, access.policy);
+	});
 
 	if (matches.length === 0) {
-		const filterNote = input.include ? ` (filter: "${input.include}")` : "";
-		const noMatchMsg = `No matches found for pattern "${input.pattern}" ${searchLocationDescription}${filterNote}.`;
-		return { llmContent: noMatchMsg };
-	}
-
-	const matchesByFile = matches.reduce<Record<string, GrepMatch[]>>(
-		(acc, match) => {
-			if (!acc[match.filePath]) acc[match.filePath] = [];
-			acc[match.filePath].push(match);
-			acc[match.filePath].sort((a, b) => a.lineNumber - b.lineNumber);
-			return acc;
-		},
-		{},
-	);
-
-	const matchCount = matches.length;
-	const matchTerm = matchCount === 1 ? "match" : "matches";
-	let llmContent = `Found ${matchCount} ${matchTerm} for pattern "${input.pattern}" ${searchLocationDescription}${input.include ? ` (filter: "${input.include}")` : ""}${wasTruncated ? ` (results limited to ${maxMatches} matches for performance)` : ""}:\n---\n`;
-
-	for (const filePath in matchesByFile) {
-		llmContent += `File: ${filePath}\n`;
-		for (const match of matchesByFile[filePath] ?? []) {
-			llmContent += `L${match.lineNumber}: ${match.line.trim()}\n`;
+		let noMatch = `No matches for pattern "${input.pattern}" in "${pathParam}".`;
+		if (input.include) {
+			noMatch = `${noMatch} filter=${input.include}`;
 		}
-		llmContent += "---\n";
+		return { llmContent: noMatch };
 	}
 
 	return {
-		llmContent: llmContent.trim(),
+		llmContent: formatCompactMatchesOutput(matches, {
+			maxMatches,
+			matchTruncated: wasTruncated,
+			maxOutputBytes,
+		}),
 	};
 }

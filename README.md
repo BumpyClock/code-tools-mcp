@@ -31,9 +31,16 @@ Workspace root is auto-detected:
 - Else if a CLI flag is passed, it’s used: `--root C:/path/to/workspace` (or `-r`).
 - Else, the server looks upward from the current working directory for a `.git` folder and uses that directory as root.
 - Else, it defaults to the current working directory.
+- After MCP initialization, if the client supports Roots, the server calls `roots/list` and uses those `file://` roots as the active permission roots.
+- If the client sends `notifications/roots/list_changed`, the server refreshes roots automatically.
+- If no valid `file://` roots are returned, the existing env/CLI/git-derived roots remain in effect.
 
 Additional workspace roots:
 - Set `CODE_TOOLS_MCP_ROOTS` or pass `--roots` (path.delimiter-separated) to add extra workspace directories.
+
+Optional unrestricted path mode:
+- Set `CODE_TOOLS_MCP_ALLOW_ANY_PATHS=true` to allow access outside configured workspace roots.
+- In this mode, tools still apply sensitive-path checks; ignore filtering defaults to off for out-of-workspace paths unless explicitly enabled.
 
 Claude config example without env var (pass a root flag):
 ```
@@ -73,6 +80,8 @@ Add to your Claude config JSON:
 
 - Uses STDIO transport; avoid `console.log` (stdout). Any diagnostics are written to stderr.
 - File operations are restricted to workspace roots.
+- You can opt into unrestricted filesystem access with `CODE_TOOLS_MCP_ALLOW_ANY_PATHS=true`.
+- By default, all tools enforce the same path policy: sensitive and git-ignored paths are blocked unless explicitly overridden.
 - `ripgrep` is a deprecated alias for `search_file_content`; use `search_file_content` going forward.
 - `.geminiignore` parameters are parsed for Gemini parity but not yet applied to ignore logic (kept as a no-op while we align behavior with `.gitignore` handling). Planned for the next minor release; see CHANGELOG for updates.
 
@@ -90,8 +99,11 @@ Lists directory contents with directories first, respects `.gitignore`.
 
 **Parameters:**
 - `dir_path` (string, required): Absolute path, or workspace-relative path to directory
+- `no_ignore` (boolean, optional): Skip gitignore filtering
+- `respect_git_ignore` (boolean, optional): Explicitly enable/disable gitignore filtering
 - `ignore` (string[], optional): Glob patterns to ignore (name matching)
 - `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean, respect_gemini_ignore?: boolean }`
+- `max_entries` (number, optional): Maximum entries included in response
 
 **Example:**
 ```typescript
@@ -105,6 +117,9 @@ Reads a file with optional pagination. Binary-aware (images, audio, PDF).
 
 **Parameters:**
 - `file_path` (string, required): Absolute path, or workspace-relative path to file
+- `no_ignore` (boolean, optional): Skip gitignore filtering
+- `respect_git_ignore` (boolean, optional): Explicitly enable/disable gitignore filtering
+- `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean, respect_gemini_ignore?: boolean }`
 - `offset` (number, optional): Starting line (0-based)
 - `limit` (number, optional): Number of lines to return
 
@@ -122,6 +137,9 @@ Creates or overwrites a file.
 
 **Parameters:**
 - `file_path` (string, required): Absolute path, or workspace-relative path of file to write
+- `no_ignore` (boolean, optional): Skip gitignore filtering
+- `respect_git_ignore` (boolean, optional): Explicitly enable/disable gitignore filtering
+- `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean, respect_gemini_ignore?: boolean }`
 - `content` (string, required): Full file content
 - `modified_by_user` (boolean, optional)
 - `ai_proposed_content` (string, optional)
@@ -147,6 +165,10 @@ Fast regex search using ripgrep (falls back to JS search if unavailable).
 - `after` (number, optional): Lines after each match (-A)
 - `before` (number, optional): Lines before each match (-B)
 - `no_ignore` (boolean, optional): If true, do not respect ignore files/default excludes
+- `respect_git_ignore` (boolean, optional): Explicitly enable/disable ignore filtering
+- `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean, respect_gemini_ignore?: boolean }`
+- `max_matches` (number, optional): Maximum matches to return
+- `max_output_bytes` (number, optional): Maximum output size in bytes
 
 **Example:**
 ```typescript
@@ -163,8 +185,11 @@ Finds files matching a glob pattern.
 - `pattern` (string, required): Glob pattern (e.g., `src/**/*.ts`)
 - `dir_path` (string, optional): Absolute directory to search within
 - `case_sensitive` (boolean, optional): Case-sensitive matching (default false)
+- `no_ignore` (boolean, optional): Skip gitignore filtering
+- `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean, respect_gemini_ignore?: boolean }`
 - `respect_git_ignore` (boolean, optional): Respect .gitignore (default true)
 - `respect_gemini_ignore` (boolean, optional): Reserved for Gemini compatibility
+- `max_results` (number, optional): Maximum paths included in response
 
 **Example:**
 ```typescript
@@ -178,6 +203,9 @@ Replaces text within a file using exact literal matching.
 
 **Parameters:**
 - `file_path` (string, required)
+- `no_ignore` (boolean, optional): Skip gitignore filtering
+- `respect_git_ignore` (boolean, optional): Explicitly enable/disable gitignore filtering
+- `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean, respect_gemini_ignore?: boolean }`
 - `instruction` (string, optional)
 - `old_string` (string, required)
 - `new_string` (string, required)
@@ -200,9 +228,13 @@ Reads and concatenates content from multiple files.
 **Parameters:**
 - `include` (string[], required): Glob patterns or paths
 - `exclude` (string[], optional)
+- `no_ignore` (boolean, optional): Skip gitignore filtering
+- `respect_git_ignore` (boolean, optional): Explicitly enable/disable gitignore filtering
 - `recursive` (boolean, optional): Defaults to true
 - `useDefaultExcludes` (boolean, optional): Defaults to true
 - `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean, respect_gemini_ignore?: boolean }`
+- `max_files` (number, optional): Maximum files included in response
+- `max_output_bytes` (number, optional): Maximum output size in bytes
 
 **Example:**
 ```typescript

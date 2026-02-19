@@ -6,12 +6,12 @@ import path from "node:path";
 import { z } from "zod";
 import { ToolErrorType } from "../types/tool-error-type.js";
 import { toolResultShape } from "../types/tool-result.js";
-import { buildIgnoreFilter, matchCustomIgnore } from "../utils/ignore.js";
+import { matchCustomIgnore } from "../utils/ignore.js";
 import {
-	isSensitivePath,
-	resolveWithinWorkspace,
-	toPosixPath,
-} from "../utils/workspace.js";
+	getPathPolicyBlockReason,
+	resolvePathAccess,
+} from "../utils/path-policy.js";
+import { toPosixPath } from "../utils/workspace.js";
 
 export const lsShape = {
 	dir_path: z
@@ -19,6 +19,14 @@ export const lsShape = {
 		.describe(
 			"Absolute path to directory, or workspace-relative path to directory.",
 		),
+	no_ignore: z
+		.boolean()
+		.optional()
+		.describe("If true, do not respect gitignore filtering for this path."),
+	respect_git_ignore: z
+		.boolean()
+		.optional()
+		.describe("If false, do not respect gitignore filtering for this path."),
 	ignore: z
 		.array(z.string())
 		.optional()
@@ -29,37 +37,30 @@ export const lsShape = {
 			respect_gemini_ignore: z.boolean().optional(),
 		})
 		.optional(),
+	max_entries: z
+		.number()
+		.int()
+		.min(1)
+		.optional()
+		.describe("Optional maximum number of entries to include in the response."),
 };
 export const lsInput = z.object(lsShape);
 export type LsInput = z.infer<typeof lsInput>;
 
 export const lsOutputShape = toolResultShape;
 
-function normalizeDirPath(input: string): { absPath: string; root: string } {
-	return resolveWithinWorkspace(input);
-}
-
 export async function lsTool(input: LsInput) {
-	let abs: string;
-	let root: string;
-	try {
-		({ absPath: abs, root } = normalizeDirPath(input.dir_path));
-	} catch (e: unknown) {
-		const msg = e instanceof Error ? e.message : String(e);
+	const access = await resolvePathAccess(input.dir_path, {
+		action: "list",
+		filtering: input,
+	});
+	if (!access.ok) {
 		return {
-			llmContent: msg,
-			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
+			llmContent: access.llmContent,
+			error: access.error,
 		};
 	}
-
-	const relDirPosix = toPosixPath(path.relative(root, abs) || ".");
-	if (isSensitivePath(relDirPosix)) {
-		const msg = `Refusing to list sensitive path: ${relDirPosix}`;
-		return {
-			llmContent: msg,
-			error: { message: msg, type: ToolErrorType.SENSITIVE_PATH },
-		};
-	}
+	const { absPath: abs, root, policy } = access;
 
 	const st = await fs.stat(abs).catch(() => null);
 	if (!st) {
@@ -76,9 +77,6 @@ export async function lsTool(input: LsInput) {
 			error: { message: msg, type: ToolErrorType.PATH_IS_NOT_A_DIRECTORY },
 		};
 	}
-
-	const respectGit = input.file_filtering_options?.respect_git_ignore ?? true;
-	const ig = await buildIgnoreFilter({ respectGitIgnore: respectGit }, root);
 
 	let gitIgnoredCount = 0;
 	const entries: Array<{
@@ -104,8 +102,9 @@ export async function lsTool(input: LsInput) {
 		const full = path.join(abs, name);
 		const relToRoot = path.relative(root, full);
 		const relPosix = toPosixPath(relToRoot);
-		if (isSensitivePath(relPosix)) continue;
-		if (ig.ignores(relPosix)) {
+		const blocked = getPathPolicyBlockReason(relPosix, policy);
+		if (blocked === "sensitive") continue;
+		if (blocked === "ignored") {
 			gitIgnoredCount += 1;
 			continue;
 		}
@@ -133,16 +132,24 @@ export async function lsTool(input: LsInput) {
 		return a.name.localeCompare(b.name);
 	});
 
-	const directoryContent = entries
-		.map((entry) => `${entry.isDirectory ? "[DIR] " : ""}${entry.name}`)
-		.join("\n");
+	const maxEntries = input.max_entries;
+	const visibleEntries =
+		typeof maxEntries === "number" ? entries.slice(0, maxEntries) : entries;
+	const hiddenCount = entries.length - visibleEntries.length;
 
-	let resultMessage = `Directory listing for ${abs}:\n${directoryContent}`;
+	const directoryContent = visibleEntries
+		.map((entry) => `${entry.isDirectory ? "[DIR] " : ""}${entry.name}`)
+		.filter(Boolean);
+
+	const lines = [`dir=${abs}`, ...directoryContent];
 	if (gitIgnoredCount > 0) {
-		resultMessage += `\n\n(${gitIgnoredCount} ignored)`;
+		lines.push(`ignored=${gitIgnoredCount}`);
+	}
+	if (hiddenCount > 0) {
+		lines.push(`truncated=${hiddenCount}`);
 	}
 
 	return {
-		llmContent: resultMessage,
+		llmContent: lines.join("\n"),
 	};
 }

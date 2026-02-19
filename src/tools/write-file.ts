@@ -6,11 +6,7 @@ import path from "node:path";
 import { z } from "zod";
 import { ToolErrorType } from "../types/tool-error-type.js";
 import { toolResultShape } from "../types/tool-result.js";
-import {
-	isSensitivePath,
-	relativizePosix,
-	resolveWithinWorkspace,
-} from "../utils/workspace.js";
+import { resolvePathAccess } from "../utils/path-policy.js";
 
 export const writeFileShape = {
 	file_path: z
@@ -18,6 +14,20 @@ export const writeFileShape = {
 		.describe(
 			"The path to the file to write to (absolute or workspace-relative).",
 		),
+	no_ignore: z
+		.boolean()
+		.optional()
+		.describe("If true, do not respect gitignore filtering for this path."),
+	respect_git_ignore: z
+		.boolean()
+		.optional()
+		.describe("If false, do not respect gitignore filtering for this path."),
+	file_filtering_options: z
+		.object({
+			respect_git_ignore: z.boolean().optional(),
+			respect_gemini_ignore: z.boolean().optional(),
+		})
+		.optional(),
 	content: z.string().describe("The content to write to the file."),
 };
 export const writeFileInput = z.object(writeFileShape);
@@ -42,28 +52,24 @@ async function ensureParentDir(filePath: string) {
 }
 
 export async function writeFileTool(input: WriteFileInput) {
-	const { file_path, content } = input;
-
-	let abs: string;
-	let root: string;
-	try {
-		({ absPath: abs, root } = resolveWithinWorkspace(file_path));
-	} catch (_e: unknown) {
-		const msg = `Path not in workspace: ${file_path}`;
+	const {
+		file_path,
+		no_ignore,
+		respect_git_ignore,
+		file_filtering_options,
+		content,
+	} = input;
+	const access = await resolvePathAccess(file_path, {
+		action: "write",
+		filtering: { no_ignore, respect_git_ignore, file_filtering_options },
+	});
+	if (!access.ok) {
 		return {
-			llmContent: msg,
-			error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
+			llmContent: access.llmContent,
+			error: access.error,
 		};
 	}
-
-	const relPosix = relativizePosix(abs, root);
-	if (isSensitivePath(relPosix)) {
-		const msg = `Refusing to write sensitive path: ${relPosix}`;
-		return {
-			llmContent: msg,
-			error: { message: msg, type: ToolErrorType.SENSITIVE_PATH },
-		};
-	}
+	const abs = access.absPath;
 
 	const { exists } = await readIfExists(abs);
 	const isNewFile = !exists;

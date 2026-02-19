@@ -17,6 +17,7 @@ export enum ToolErrorType {
 	TARGET_IS_DIRECTORY = "target_is_directory",
 	PATH_NOT_IN_WORKSPACE = "path_not_in_workspace",
 	SENSITIVE_PATH = "sensitive_path",
+	PATH_IGNORED_BY_POLICY = "path_ignored_by_policy",
 	SEARCH_PATH_NOT_FOUND = "search_path_not_found",
 	SEARCH_PATH_NOT_A_DIRECTORY = "search_path_not_a_directory",
 	EDIT_PREPARATION_FAILURE = "edit_preparation_failure",

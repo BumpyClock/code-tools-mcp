@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { RootsListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { z } from "zod";
 import {
 	type editInput,
@@ -47,6 +48,8 @@ import {
 	writeFileTool,
 } from "./tools/write-file.js";
 import type { ToolContent, ToolError } from "./types/tool-result.js";
+import { applyMcpRoots } from "./utils/mcp-roots.js";
+import { getWorkspaceRoots } from "./utils/workspace.js";
 
 type ToolOutput = {
 	llmContent?: string | ToolContent[];
@@ -92,6 +95,7 @@ function toContent(llmContent?: string | ToolContent[]): McpContent[] {
 function wrapResult(result: ToolOutput) {
 	return {
 		content: toContent(result.llmContent),
+		structuredContent: result,
 		isError: !!result.error,
 	};
 }
@@ -112,6 +116,43 @@ const server = new McpServer({
 	name: "code-tools-mcp",
 	version: readPackageVersion(),
 });
+
+async function syncWorkspaceRootsFromClient(
+	reason: "initialized" | "list_changed",
+): Promise<void> {
+	const caps = server.server.getClientCapabilities();
+	if (!caps?.roots) return;
+	try {
+		const list = await server.server.listRoots();
+		const { applied, roots, invalidUris } = applyMcpRoots(list.roots ?? []);
+		if (invalidUris.length > 0) {
+			console.error(
+				`[roots] Ignoring ${invalidUris.length} non-file URI root(s) (${reason}).`,
+			);
+		}
+		if (!applied) {
+			console.error(
+				`[roots] No usable client roots (${reason}); keeping existing roots: ${getWorkspaceRoots().join(path.delimiter)}`,
+			);
+			return;
+		}
+		console.error(
+			`[roots] Applied ${roots.length} client root(s) (${reason}): ${roots.join(path.delimiter)}`,
+		);
+	} catch (error) {
+		console.error(`[roots] Failed to sync client roots (${reason}).`, error);
+	}
+}
+
+server.server.oninitialized = () => {
+	void syncWorkspaceRootsFromClient("initialized");
+};
+server.server.setNotificationHandler(
+	RootsListChangedNotificationSchema,
+	async () => {
+		await syncWorkspaceRootsFromClient("list_changed");
+	},
+);
 
 server.registerTool(
 	"list_directory",

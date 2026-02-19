@@ -10,6 +10,17 @@ let WORKSPACE_ROOTS: string[] | null = null;
 let WORKSPACE_ROOTS_REAL: Map<string, string> | null = null;
 let WORKSPACE_CONTEXT: WorkspaceContext | null = null;
 
+function envIsTrue(value: string | undefined): boolean {
+	if (!value) return false;
+	const normalized = value.trim().toLowerCase();
+	return (
+		normalized === "1" ||
+		normalized === "true" ||
+		normalized === "yes" ||
+		normalized === "on"
+	);
+}
+
 function parseRootArg(argv: string[]): string | null {
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
@@ -56,6 +67,22 @@ function findGitRoot(start: string): string | null {
 		dir = parent;
 	}
 	return null;
+}
+
+function inferExternalRoot(absPath: string): string {
+	let base = findNearestExistingAncestor(absPath);
+	try {
+		const st = fs.statSync(base);
+		if (st.isFile()) {
+			base = path.dirname(base);
+		}
+	} catch {}
+	const gitRoot = findGitRoot(base);
+	return gitRoot ?? base;
+}
+
+export function isAnyPathAccessEnabled(): boolean {
+	return envIsTrue(process.env.CODE_TOOLS_MCP_ALLOW_ANY_PATHS);
 }
 
 function initPrimaryRoot(): string {
@@ -211,6 +238,7 @@ function isWithinRoot(absPath: string, root: string): boolean {
 export function resolveWithinWorkspace(p: string): {
 	absPath: string;
 	root: string;
+	outsideWorkspace?: boolean;
 } {
 	const roots = getWorkspaceRoots();
 	const primary = getPrimaryWorkspaceRoot();
@@ -221,6 +249,13 @@ export function resolveWithinWorkspace(p: string): {
 		if (isWithinRoot(norm, root)) {
 			return { absPath: norm, root };
 		}
+	}
+	if (isAnyPathAccessEnabled()) {
+		return {
+			absPath: norm,
+			root: inferExternalRoot(norm),
+			outsideWorkspace: true,
+		};
 	}
 	throw new Error(`Path is outside workspace roots: ${p}`);
 }

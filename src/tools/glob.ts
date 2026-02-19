@@ -7,13 +7,13 @@ import fg from "fast-glob";
 import { z } from "zod";
 import { ToolErrorType } from "../types/tool-error-type.js";
 import { toolResultShape } from "../types/tool-result.js";
-import { buildIgnoreFilter } from "../utils/ignore.js";
 import {
-	getWorkspaceRoots,
-	isSensitivePath,
-	resolveWithinWorkspace,
-	toPosixPath,
-} from "../utils/workspace.js";
+	getPathPolicyBlockReason,
+	getPolicyContextForRoot,
+	resolvePathAccess,
+	resolveRespectGitIgnore,
+} from "../utils/path-policy.js";
+import { getWorkspaceRoots, toPosixPath } from "../utils/workspace.js";
 
 export const globShape = {
 	pattern: z.string().describe("Glob pattern to match against."),
@@ -27,6 +27,16 @@ export const globShape = {
 		.boolean()
 		.optional()
 		.describe("Optional: case-sensitive matching (default false)."),
+	no_ignore: z
+		.boolean()
+		.optional()
+		.describe("If true, do not respect ignore files."),
+	file_filtering_options: z
+		.object({
+			respect_git_ignore: z.boolean().optional(),
+			respect_gemini_ignore: z.boolean().optional(),
+		})
+		.optional(),
 	respect_git_ignore: z
 		.boolean()
 		.optional()
@@ -35,6 +45,12 @@ export const globShape = {
 		.boolean()
 		.optional()
 		.describe("Optional: respect .geminiignore patterns (default true)."),
+	max_results: z
+		.number()
+		.int()
+		.min(1)
+		.optional()
+		.describe("Optional maximum number of matching file paths to return."),
 };
 export const globInput = z.object(globShape);
 export type GlobInput = z.infer<typeof globInput>;
@@ -92,20 +108,24 @@ async function gatherEntries(
 
 export async function globTool(input: GlobInput, _signal?: AbortSignal) {
 	const caseSensitive = input.case_sensitive ?? false;
-	const respectGit = input.respect_git_ignore ?? true;
+	let respectGit = resolveRespectGitIgnore(input);
 
 	let searchTargets: Array<{ dir: string; root: string }> = [];
+	const policyByRoot = new Map<
+		string,
+		Awaited<ReturnType<typeof getPolicyContextForRoot>>
+	>();
 	if (input.dir_path) {
-		try {
-			const resolved = resolveWithinWorkspace(input.dir_path);
-			searchTargets = [{ dir: resolved.absPath, root: resolved.root }];
-		} catch (e: unknown) {
-			const msg = e instanceof Error ? e.message : String(e);
-			return {
-				llmContent: msg,
-				error: { message: msg, type: ToolErrorType.PATH_NOT_IN_WORKSPACE },
-			};
+		const access = await resolvePathAccess(input.dir_path, {
+			action: "glob",
+			filtering: input,
+		});
+		if (!access.ok) {
+			return { llmContent: access.llmContent, error: access.error };
 		}
+		searchTargets = [{ dir: access.absPath, root: access.root }];
+		policyByRoot.set(access.root, access.policy);
+		respectGit = access.policy.respectGitIgnore;
 	} else {
 		searchTargets = getWorkspaceRoots().map((root) => ({ dir: root, root }));
 	}
@@ -139,18 +159,15 @@ export async function globTool(input: GlobInput, _signal?: AbortSignal) {
 			input.pattern,
 			caseSensitive,
 		);
-		if (!respectGit) {
-			allEntries.push(...entries);
-			continue;
+		let policy = policyByRoot.get(target.root);
+		if (!policy) {
+			policy = await getPolicyContextForRoot(target.root, respectGit);
+			policyByRoot.set(target.root, policy);
 		}
-		const ig = await buildIgnoreFilter({ respectGitIgnore: true }, target.root);
 		for (const entry of entries) {
 			const rel = toPosixPath(path.relative(target.root, entry.path));
-			if (isSensitivePath(rel)) {
-				ignoredCount += 1;
-				continue;
-			}
-			if (ig.ignores(rel)) {
+			const blocked = getPathPolicyBlockReason(rel, policy);
+			if (blocked) {
 				ignoredCount += 1;
 				continue;
 			}
@@ -175,9 +192,15 @@ export async function globTool(input: GlobInput, _signal?: AbortSignal) {
 
 	const now = Date.now();
 	const sortedEntries = sortFileEntries(allEntries, now);
-	const sortedAbsolutePaths = sortedEntries.map((entry) => entry.path);
+	const maxResults = input.max_results;
+	const visibleEntries =
+		typeof maxResults === "number"
+			? sortedEntries.slice(0, maxResults)
+			: sortedEntries;
+	const hiddenCount = sortedEntries.length - visibleEntries.length;
+	const sortedAbsolutePaths = visibleEntries.map((entry) => entry.path);
 	const fileListDescription = sortedAbsolutePaths.join("\n");
-	const fileCount = sortedAbsolutePaths.length;
+	const fileCount = sortedEntries.length;
 
 	let resultMessage = `Found ${fileCount} file(s) matching "${input.pattern}"`;
 	if (searchTargets.length === 1) {
@@ -187,6 +210,9 @@ export async function globTool(input: GlobInput, _signal?: AbortSignal) {
 	}
 	if (ignoredCount > 0) {
 		resultMessage += ` (${ignoredCount} additional files were ignored)`;
+	}
+	if (hiddenCount > 0) {
+		resultMessage += ` (truncated by ${hiddenCount})`;
 	}
 	resultMessage += `, sorted by modification time (newest first):\n${fileListDescription}`;
 

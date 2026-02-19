@@ -13,11 +13,14 @@ import {
 	MAX_BINARY_BYTES,
 	mapBinaryPart,
 } from "../utils/file-content.js";
-import { buildIgnoreFilter } from "../utils/ignore.js";
+import {
+	getPathPolicyBlockReason,
+	getPolicyContextForRoot,
+	resolveRespectGitIgnore,
+} from "../utils/path-policy.js";
 import {
 	getPrimaryWorkspaceRoot,
 	getWorkspaceRoots,
-	isSensitivePath,
 	relativizePosix,
 	resolveWithinWorkspace,
 } from "../utils/workspace.js";
@@ -31,6 +34,14 @@ export const readManyFilesShape = {
 		.array(z.string())
 		.optional()
 		.describe("Optional glob patterns to exclude."),
+	no_ignore: z
+		.boolean()
+		.optional()
+		.describe("If true, do not respect ignore files."),
+	respect_git_ignore: z
+		.boolean()
+		.optional()
+		.describe("If false, do not respect gitignore filtering."),
 	recursive: z
 		.boolean()
 		.optional()
@@ -45,6 +56,18 @@ export const readManyFilesShape = {
 			respect_gemini_ignore: z.boolean().optional(),
 		})
 		.optional(),
+	max_files: z
+		.number()
+		.int()
+		.min(1)
+		.optional()
+		.describe("Optional maximum number of files to include."),
+	max_output_bytes: z
+		.number()
+		.int()
+		.min(1)
+		.optional()
+		.describe("Optional maximum output size in bytes."),
 };
 export const readManyFilesInput = z.object(readManyFilesShape);
 export type ReadManyFilesInput = z.infer<typeof readManyFilesInput>;
@@ -57,7 +80,6 @@ const DEFAULT_EXCLUDES = [
 	"**/*.tmp",
 ];
 const DEFAULT_OUTPUT_SEPARATOR_FORMAT = "--- {filePath} ---";
-const DEFAULT_OUTPUT_TERMINATOR = "\n--- End of content ---";
 const TOTAL_BYTE_CAP = 2 * 1024 * 1024;
 const MAX_TEXT_BYTES = 1024 * 1024;
 
@@ -97,13 +119,41 @@ async function globWithinRoot(
 	return Array.from(entries);
 }
 
+async function globAbsoluteInclude(
+	includePattern: string,
+	exclude: string[],
+): Promise<string[]> {
+	const normalized = path.normalize(includePattern);
+	const st = await fs.stat(normalized).catch(() => null);
+	if (st?.isFile()) return [normalized];
+	if (st?.isDirectory()) {
+		return fg("**/*", {
+			cwd: normalized,
+			ignore: exclude,
+			onlyFiles: true,
+			dot: true,
+			absolute: true,
+			followSymbolicLinks: false,
+		});
+	}
+	return fg(includePattern, {
+		ignore: exclude,
+		onlyFiles: true,
+		dot: true,
+		absolute: true,
+		followSymbolicLinks: false,
+	});
+}
+
 export async function readManyFilesTool(input: ReadManyFilesInput) {
 	const primaryRoot = getPrimaryWorkspaceRoot();
 	const roots = getWorkspaceRoots();
 	const include = input.include;
 	const exclude = input.exclude ?? [];
 	const useDefaultExcludes = input.useDefaultExcludes !== false;
-	const respectGit = input.file_filtering_options?.respect_git_ignore ?? true;
+	const respectGit = resolveRespectGitIgnore(input);
+	const maxFiles = input.max_files;
+	const maxOutputBytes = input.max_output_bytes ?? TOTAL_BYTE_CAP;
 
 	const effectiveExcludes = useDefaultExcludes
 		? [...DEFAULT_EXCLUDES, ...exclude]
@@ -116,6 +166,16 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 			filesToConsider.add(match);
 		}
 	}
+	for (const includePattern of include) {
+		if (!path.isAbsolute(includePattern)) continue;
+		const matches = await globAbsoluteInclude(
+			includePattern,
+			effectiveExcludes,
+		);
+		for (const match of matches) {
+			filesToConsider.add(path.normalize(match));
+		}
+	}
 
 	if (filesToConsider.size === 0) {
 		return {
@@ -126,16 +186,23 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 
 	const contentParts: ToolContent[] = [];
 	let totalBytes = 0;
-	const ignoreCache = new Map<
+	const policyByRoot = new Map<
 		string,
-		Awaited<ReturnType<typeof buildIgnoreFilter>>
+		Awaited<ReturnType<typeof getPolicyContextForRoot>>
 	>();
+	let includedFiles = 0;
+	let truncatedByFiles = false;
+	let truncatedByBytes = false;
 
 	const sortedFilesToConsider = Array.from(filesToConsider).sort((a, b) =>
 		a.localeCompare(b),
 	);
 
 	for (const abs of sortedFilesToConsider) {
+		if (typeof maxFiles === "number" && includedFiles >= maxFiles) {
+			truncatedByFiles = true;
+			break;
+		}
 		let resolvedRoot = primaryRoot;
 		try {
 			resolvedRoot = resolveWithinWorkspace(abs).root;
@@ -143,18 +210,13 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 			continue;
 		}
 		const relPosix = relativizePosix(abs, resolvedRoot);
-		if (isSensitivePath(relPosix)) {
-			continue;
+		let policy = policyByRoot.get(resolvedRoot);
+		if (!policy) {
+			policy = await getPolicyContextForRoot(resolvedRoot, respectGit);
+			policyByRoot.set(resolvedRoot, policy);
 		}
-		if (respectGit) {
-			let ig = ignoreCache.get(resolvedRoot);
-			if (!ig) {
-				ig = await buildIgnoreFilter({ respectGitIgnore: true }, resolvedRoot);
-				ignoreCache.set(resolvedRoot, ig);
-			}
-			if (ig.ignores(relPosix)) {
-				continue;
-			}
+		if (getPathPolicyBlockReason(relPosix, policy)) {
+			continue;
 		}
 
 		let st: Awaited<ReturnType<typeof fs.stat>> | undefined;
@@ -202,17 +264,27 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 			"{filePath}",
 			path.relative(primaryRoot, abs),
 		);
-		const chunk = `${separator}\n\n${text}\n\n`;
+		const chunk = `${separator}\n${text}\n`;
 		const projected = totalBytes + Buffer.byteLength(chunk, "utf8");
-		if (projected > TOTAL_BYTE_CAP) {
+		if (projected > maxOutputBytes) {
+			truncatedByBytes = true;
 			break;
 		}
 		contentParts.push({ type: "text", text: chunk });
 		totalBytes = projected;
+		includedFiles += 1;
 	}
 
 	if (contentParts.length > 0) {
-		contentParts.push({ type: "text", text: DEFAULT_OUTPUT_TERMINATOR });
+		if (truncatedByFiles || truncatedByBytes) {
+			const reasonParts: string[] = [];
+			if (truncatedByFiles) reasonParts.push("max_files");
+			if (truncatedByBytes) reasonParts.push("max_output_bytes");
+			contentParts.push({
+				type: "text",
+				text: `TRUNCATED reason=${reasonParts.join(",")}`,
+			});
+		}
 	} else {
 		contentParts.push({
 			type: "text",
