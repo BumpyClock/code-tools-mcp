@@ -53,7 +53,6 @@
 	"dependencies": {
 		"@joshua.litt/get-ripgrep": "^0.0.2",
 		"@modelcontextprotocol/sdk": "^1.19.1",
-		"diff": "^8.0.2",
 		"fast-glob": "^3.3.3",
 		"ignore": "^7.0.5",
 		"istextorbinary": "^9.5.0",

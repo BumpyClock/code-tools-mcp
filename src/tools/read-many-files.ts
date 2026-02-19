@@ -124,8 +124,6 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 		};
 	}
 
-	const processedFilesRelativePaths: string[] = [];
-	const skippedFiles: Array<{ path: string; reason: string }> = [];
 	const contentParts: ToolContent[] = [];
 	let totalBytes = 0;
 	const ignoreCache = new Map<
@@ -146,7 +144,6 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 		}
 		const relPosix = relativizePosix(abs, resolvedRoot);
 		if (isSensitivePath(relPosix)) {
-			skippedFiles.push({ path: relPosix, reason: "sensitive" });
 			continue;
 		}
 		if (respectGit) {
@@ -156,7 +153,6 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 				ignoreCache.set(resolvedRoot, ig);
 			}
 			if (ig.ignores(relPosix)) {
-				skippedFiles.push({ path: relPosix, reason: "ignored" });
 				continue;
 			}
 		}
@@ -165,11 +161,9 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 		try {
 			st = await fs.stat(abs);
 		} catch {
-			skippedFiles.push({ path: relPosix, reason: "read error" });
 			continue;
 		}
 		if (!st.isFile()) {
-			skippedFiles.push({ path: relPosix, reason: "not a file" });
 			continue;
 		}
 
@@ -179,21 +173,17 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 
 		if (isBinary) {
 			if (!isExplicitBinaryRequest(include, ext)) {
-				skippedFiles.push({ path: relPosix, reason: "binary" });
 				continue;
 			}
 			if (st.size > MAX_BINARY_BYTES) {
-				skippedFiles.push({ path: relPosix, reason: "too large" });
 				continue;
 			}
 			const buf = await fs.readFile(abs);
 			contentParts.push(mapBinaryPart(mimeType, buf.toString("base64")));
-			processedFilesRelativePaths.push(relativizePosix(abs, primaryRoot));
 			continue;
 		}
 
 		if (st.size > MAX_TEXT_BYTES) {
-			skippedFiles.push({ path: relPosix, reason: "too large" });
 			continue;
 		}
 
@@ -201,11 +191,9 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 		try {
 			buf = await fs.readFile(abs);
 		} catch {
-			skippedFiles.push({ path: relPosix, reason: "read error" });
 			continue;
 		}
 		if (!isText(null, buf)) {
-			skippedFiles.push({ path: relPosix, reason: "binary" });
 			continue;
 		}
 
@@ -217,12 +205,10 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 		const chunk = `${separator}\n\n${text}\n\n`;
 		const projected = totalBytes + Buffer.byteLength(chunk, "utf8");
 		if (projected > TOTAL_BYTE_CAP) {
-			skippedFiles.push({ path: relPosix, reason: "total cap reached" });
 			break;
 		}
 		contentParts.push({ type: "text", text: chunk });
 		totalBytes = projected;
-		processedFilesRelativePaths.push(relativizePosix(abs, primaryRoot));
 	}
 
 	if (contentParts.length > 0) {
