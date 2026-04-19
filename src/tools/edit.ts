@@ -6,7 +6,10 @@ import path from "node:path";
 import { z } from "zod";
 import { ToolErrorType } from "../types/tool-error-type.js";
 import { toolResultShape } from "../types/tool-result.js";
-import { resolvePathAccess } from "../utils/path-policy.js";
+import {
+	createCommonFileFilteringShape,
+	resolvePathAccess,
+} from "../utils/path-policy.js";
 
 export const editShape = {
 	file_path: z
@@ -14,20 +17,11 @@ export const editShape = {
 		.describe(
 			"The path to the file to modify (absolute or workspace-relative).",
 		),
-	no_ignore: z
-		.boolean()
-		.optional()
-		.describe("If true, do not respect gitignore filtering for this path."),
-	respect_git_ignore: z
-		.boolean()
-		.optional()
-		.describe("If false, do not respect gitignore filtering for this path."),
-	file_filtering_options: z
-		.object({
-			respect_git_ignore: z.boolean().optional(),
-			respect_gemini_ignore: z.boolean().optional(),
-		})
-		.optional(),
+	...createCommonFileFilteringShape({
+		noIgnore: "If true, do not respect gitignore filtering for this path.",
+		respectGitIgnore:
+			"If false, do not respect gitignore filtering for this path.",
+	}),
 	instruction: z
 		.string()
 		.optional()

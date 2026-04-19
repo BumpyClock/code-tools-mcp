@@ -2,6 +2,7 @@
 // ABOUTME: Provides one policy path for tools to enforce consistent access behavior.
 
 import type { Ignore } from "ignore";
+import { z } from "zod";
 import { ToolErrorType } from "../types/tool-error-type.js";
 import type { ToolError } from "../types/tool-result.js";
 import { buildIgnoreFilter } from "./ignore.js";
@@ -17,6 +18,31 @@ export interface CommonFileFilteringOptions {
 	file_filtering_options?: {
 		respect_git_ignore?: boolean;
 		respect_gemini_ignore?: boolean;
+	};
+}
+
+export interface CommonFileFilteringDescriptions {
+	noIgnore: string;
+	respectGitIgnore: string;
+}
+
+const fileFilteringOptionsField = z
+	.object({
+		respect_git_ignore: z.boolean().optional(),
+		respect_gemini_ignore: z.boolean().optional(),
+	})
+	.optional();
+
+export function createCommonFileFilteringShape(
+	descriptions: CommonFileFilteringDescriptions,
+) {
+	return {
+		no_ignore: z.boolean().optional().describe(descriptions.noIgnore),
+		respect_git_ignore: z
+			.boolean()
+			.optional()
+			.describe(descriptions.respectGitIgnore),
+		file_filtering_options: fileFilteringOptionsField,
 	};
 }
 

@@ -15,7 +15,10 @@ import {
 	MAX_BINARY_BYTES,
 	mapBinaryPart,
 } from "../utils/file-content.js";
-import { resolvePathAccess } from "../utils/path-policy.js";
+import {
+	createCommonFileFilteringShape,
+	resolvePathAccess,
+} from "../utils/path-policy.js";
 
 const MAX_FULL_READ_BYTES = 2 * 1024 * 1024;
 const SNIFF_BYTES = 8192;
@@ -25,20 +28,11 @@ export const readFileShape = {
 	file_path: z
 		.string()
 		.describe("The path to the file to read (absolute or workspace-relative)."),
-	no_ignore: z
-		.boolean()
-		.optional()
-		.describe("If true, do not respect gitignore filtering for this path."),
-	respect_git_ignore: z
-		.boolean()
-		.optional()
-		.describe("If false, do not respect gitignore filtering for this path."),
-	file_filtering_options: z
-		.object({
-			respect_git_ignore: z.boolean().optional(),
-			respect_gemini_ignore: z.boolean().optional(),
-		})
-		.optional(),
+	...createCommonFileFilteringShape({
+		noIgnore: "If true, do not respect gitignore filtering for this path.",
+		respectGitIgnore:
+			"If false, do not respect gitignore filtering for this path.",
+	}),
 	offset: z
 		.number()
 		.int()

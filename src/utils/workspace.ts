@@ -3,12 +3,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { WorkspaceContext } from "./workspace-context.js";
 
 let WORKSPACE_ROOT: string | null = null;
 let WORKSPACE_ROOTS: string[] | null = null;
 let WORKSPACE_ROOTS_REAL: Map<string, string> | null = null;
-let WORKSPACE_CONTEXT: WorkspaceContext | null = null;
 
 function envIsTrue(value: string | undefined): boolean {
 	if (!value) return false;
@@ -107,16 +105,6 @@ function initWorkspaceRoots(): string[] {
 	return unique;
 }
 
-function initWorkspaceContext(): WorkspaceContext {
-	const roots = getWorkspaceRoots();
-	if (roots.length === 0) {
-		throw new Error("Workspace roots are empty; cannot initialize context.");
-	}
-	const primary = roots[0];
-	const extras = roots.slice(1);
-	return new WorkspaceContext(primary, extras);
-}
-
 export function getWorkspaceRoot(): string {
 	return getPrimaryWorkspaceRoot();
 }
@@ -127,7 +115,6 @@ export function getPrimaryWorkspaceRoot(): string {
 		WORKSPACE_ROOT = roots[0];
 		WORKSPACE_ROOTS = roots;
 		WORKSPACE_ROOTS_REAL = null;
-		WORKSPACE_CONTEXT = null;
 	}
 	return WORKSPACE_ROOT;
 }
@@ -138,16 +125,8 @@ export function getWorkspaceRoots(): readonly string[] {
 		WORKSPACE_ROOTS = roots;
 		WORKSPACE_ROOT = roots[0];
 		WORKSPACE_ROOTS_REAL = null;
-		WORKSPACE_CONTEXT = null;
 	}
 	return WORKSPACE_ROOTS;
-}
-
-export function getWorkspaceContext(): WorkspaceContext {
-	if (!WORKSPACE_CONTEXT) {
-		WORKSPACE_CONTEXT = initWorkspaceContext();
-	}
-	return WORKSPACE_CONTEXT;
 }
 
 function getRootReal(root: string): string {
@@ -170,7 +149,6 @@ export function setWorkspaceRoot(root: string) {
 	WORKSPACE_ROOT = path.resolve(root);
 	WORKSPACE_ROOTS = [WORKSPACE_ROOT];
 	WORKSPACE_ROOTS_REAL = null;
-	WORKSPACE_CONTEXT = null;
 }
 
 export function setWorkspaceRoots(roots: readonly string[]) {
@@ -178,14 +156,12 @@ export function setWorkspaceRoots(roots: readonly string[]) {
 		WORKSPACE_ROOT = null;
 		WORKSPACE_ROOTS = [];
 		WORKSPACE_ROOTS_REAL = null;
-		WORKSPACE_CONTEXT = null;
 		console.warn("[workspace] Cleared workspace roots.");
 		return;
 	}
 	WORKSPACE_ROOTS = roots.map((entry) => path.resolve(entry));
 	WORKSPACE_ROOT = WORKSPACE_ROOTS[0];
 	WORKSPACE_ROOTS_REAL = null;
-	WORKSPACE_CONTEXT = null;
 }
 
 function findNearestExistingAncestor(p: string): string {

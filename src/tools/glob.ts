@@ -8,6 +8,7 @@ import { z } from "zod";
 import { ToolErrorType } from "../types/tool-error-type.js";
 import { toolResultShape } from "../types/tool-result.js";
 import {
+	createCommonFileFilteringShape,
 	getPathPolicyBlockReason,
 	getPolicyContextForRoot,
 	resolvePathAccess,
@@ -27,20 +28,10 @@ export const globShape = {
 		.boolean()
 		.optional()
 		.describe("Optional: case-sensitive matching (default false)."),
-	no_ignore: z
-		.boolean()
-		.optional()
-		.describe("If true, do not respect ignore files."),
-	file_filtering_options: z
-		.object({
-			respect_git_ignore: z.boolean().optional(),
-			respect_gemini_ignore: z.boolean().optional(),
-		})
-		.optional(),
-	respect_git_ignore: z
-		.boolean()
-		.optional()
-		.describe("Optional: respect .gitignore patterns (default true)."),
+	...createCommonFileFilteringShape({
+		noIgnore: "If true, do not respect ignore files.",
+		respectGitIgnore: "Optional: respect .gitignore patterns (default true).",
+	}),
 	respect_gemini_ignore: z
 		.boolean()
 		.optional()

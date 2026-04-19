@@ -8,6 +8,7 @@ import { ToolErrorType } from "../types/tool-error-type.js";
 import { toolResultShape } from "../types/tool-result.js";
 import { matchCustomIgnore } from "../utils/ignore.js";
 import {
+	createCommonFileFilteringShape,
 	getPathPolicyBlockReason,
 	resolvePathAccess,
 } from "../utils/path-policy.js";
@@ -19,24 +20,15 @@ export const lsShape = {
 		.describe(
 			"Absolute path to directory, or workspace-relative path to directory.",
 		),
-	no_ignore: z
-		.boolean()
-		.optional()
-		.describe("If true, do not respect gitignore filtering for this path."),
-	respect_git_ignore: z
-		.boolean()
-		.optional()
-		.describe("If false, do not respect gitignore filtering for this path."),
+	...createCommonFileFilteringShape({
+		noIgnore: "If true, do not respect gitignore filtering for this path.",
+		respectGitIgnore:
+			"If false, do not respect gitignore filtering for this path.",
+	}),
 	ignore: z
 		.array(z.string())
 		.optional()
 		.describe("Optional glob patterns to ignore (name matching)."),
-	file_filtering_options: z
-		.object({
-			respect_git_ignore: z.boolean().optional(),
-			respect_gemini_ignore: z.boolean().optional(),
-		})
-		.optional(),
 	max_entries: z
 		.number()
 		.int()
