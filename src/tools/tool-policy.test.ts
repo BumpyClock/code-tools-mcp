@@ -39,6 +39,7 @@ afterEach(async () => {
 		await fs.rm(absolute, { recursive: true, force: true });
 	}
 	CREATED_PATHS.clear();
+	await fs.rm(TEST_DIR, { recursive: true, force: true });
 });
 
 describe("tool policy and paging regressions", () => {
@@ -171,6 +172,46 @@ describe("tool policy and paging regressions", () => {
 		assert.ok(!output.includes("--- End of content ---"));
 	});
 
+	it("read_many_files reports truncation when first text file exceeds max_output_bytes", async () => {
+		await ensureTestDir();
+		const filePath = rememberPath(path.join(TEST_DIR, "too-large-first.txt"));
+		await fs.writeFile(filePath, "x".repeat(64), "utf8");
+
+		const result = await readManyFilesTool({
+			include: [filePath],
+			max_output_bytes: 10,
+		});
+		const output = textFromResult(result);
+		assert.match(output, /TRUNCATED reason=max_output_bytes/);
+		assert.ok(!output.includes("No files matching"));
+	});
+
+	it("read_many_files counts binary files toward max_files", async () => {
+		await ensureTestDir();
+		const files = [
+			path.join(TEST_DIR, "binary-a.png"),
+			path.join(TEST_DIR, "binary-b.png"),
+		];
+		for (const filePath of files) {
+			rememberPath(filePath);
+			await fs.writeFile(
+				filePath,
+				Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+			);
+		}
+
+		const result = await readManyFilesTool({
+			include: [`${TEST_DIR}/*.png`],
+			max_files: 1,
+		});
+		assert.ok(Array.isArray(result.llmContent));
+		assert.equal(
+			result.llmContent.filter((part) => part.type === "image").length,
+			1,
+		);
+		assert.match(textFromResult(result), /TRUNCATED reason=max_files/);
+	});
+
 	it("list_directory supports max_entries truncation", async () => {
 		await ensureTestDir();
 		const dir = rememberPath(path.join(TEST_DIR, "ls-max-entries"));
@@ -201,6 +242,56 @@ describe("tool policy and paging regressions", () => {
 
 		const glob = await globTool({ pattern: "src/**/*.ts", dir_path: "." });
 		assert.equal(glob.error, undefined);
+	});
+
+	it("search_file_content reports invalid regex instead of no matches", async () => {
+		const result = await searchFileContentTool({
+			pattern: "(",
+			dir_path: ".",
+			include: "src/**/*.ts",
+		});
+		assert.equal(result.error?.type, "invalid_tool_params");
+		assert.match(
+			textFromResult(result),
+			/regex|regular expression|unterminated/i,
+		);
+	});
+
+	it("search_file_content falls back when bundled rg cannot execute", async () => {
+		await ensureTestDir();
+		const filePath = rememberPath(path.join(TEST_DIR, "search-fallback.txt"));
+		await fs.writeFile(filePath, "needle\n", "utf8");
+
+		const prevPath = process.env.PATH;
+		const prevHome = process.env.HOME;
+		const localBinDir = path.join(
+			TEST_DIR,
+			".local",
+			"share",
+			"code-tools-mcp",
+			"bin",
+		);
+		const localRg = rememberPath(path.join(localBinDir, "rg"));
+
+		try {
+			await fs.mkdir(localBinDir, { recursive: true });
+			await fs.writeFile(localRg, "#!/bin/sh\nexit 0\n", { mode: 0o644 });
+			process.env.PATH = "/usr/bin:/bin";
+			process.env.HOME = path.resolve(TEST_DIR);
+
+			const result = await searchFileContentTool({
+				pattern: "needle",
+				dir_path: filePath,
+				fixed_strings: true,
+			});
+			assert.equal(result.error, undefined);
+			assert.match(textFromResult(result), /matches=1/);
+		} finally {
+			if (prevPath === undefined) delete process.env.PATH;
+			else process.env.PATH = prevPath;
+			if (prevHome === undefined) delete process.env.HOME;
+			else process.env.HOME = prevHome;
+		}
 	});
 
 	it("allows outside-workspace paths when CODE_TOOLS_MCP_ALLOW_ANY_PATHS is enabled", async () => {

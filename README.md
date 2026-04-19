@@ -143,8 +143,6 @@ Creates or overwrites a file.
 - `respect_git_ignore` (boolean, optional): Explicitly enable/disable gitignore filtering
 - `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean, respect_gemini_ignore?: boolean }`
 - `content` (string, required): Full file content
-- `modified_by_user` (boolean, optional)
-- `ai_proposed_content` (string, optional)
 
 **Example:**
 ```typescript
@@ -163,9 +161,9 @@ Fast regex search using ripgrep (falls back to JS search if unavailable).
 - `include` (string, optional): Glob filter (e.g., `**/*.ts`)
 - `case_sensitive` (boolean, optional): If true, search is case-sensitive (default false)
 - `fixed_strings` (boolean, optional): If true, treat pattern as literal
-- `context` (number, optional): Context lines around each match (-C)
-- `after` (number, optional): Lines after each match (-A)
-- `before` (number, optional): Lines before each match (-B)
+- `context` (number, optional): Accepted for ripgrep parity; compact output currently returns matching lines only
+- `after` (number, optional): Accepted for ripgrep parity; compact output currently returns matching lines only
+- `before` (number, optional): Accepted for ripgrep parity; compact output currently returns matching lines only
 - `no_ignore` (boolean, optional): If true, do not respect ignore files/default excludes
 - `respect_git_ignore` (boolean, optional): Explicitly enable/disable ignore filtering
 - `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean, respect_gemini_ignore?: boolean }`
@@ -212,8 +210,6 @@ Replaces text within a file using exact literal matching.
 - `old_string` (string, required)
 - `new_string` (string, required)
 - `expected_replacements` (number, optional)
-- `modified_by_user` (boolean, optional)
-- `ai_proposed_content` (string, optional)
 
 **Example:**
 ```typescript
@@ -232,7 +228,7 @@ Reads and concatenates content from multiple files.
 - `exclude` (string[], optional)
 - `no_ignore` (boolean, optional): Skip gitignore filtering
 - `respect_git_ignore` (boolean, optional): Explicitly enable/disable gitignore filtering
-- `recursive` (boolean, optional): Defaults to true
+- `recursive` (boolean, optional): Reserved for compatibility; recursive search is currently the default behavior
 - `useDefaultExcludes` (boolean, optional): Defaults to true
 - `file_filtering_options` (object, optional): `{ respect_git_ignore?: boolean, respect_gemini_ignore?: boolean }`
 - `max_files` (number, optional): Maximum files included in response

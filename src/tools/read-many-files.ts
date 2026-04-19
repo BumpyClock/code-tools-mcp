@@ -14,6 +14,7 @@ import {
 	mapBinaryPart,
 } from "../utils/file-content.js";
 import {
+	createCommonFileFilteringShape,
 	getPathPolicyBlockReason,
 	getPolicyContextForRoot,
 	resolveRespectGitIgnore,
@@ -34,14 +35,10 @@ export const readManyFilesShape = {
 		.array(z.string())
 		.optional()
 		.describe("Optional glob patterns to exclude."),
-	no_ignore: z
-		.boolean()
-		.optional()
-		.describe("If true, do not respect ignore files."),
-	respect_git_ignore: z
-		.boolean()
-		.optional()
-		.describe("If false, do not respect gitignore filtering."),
+	...createCommonFileFilteringShape({
+		noIgnore: "If true, do not respect ignore files.",
+		respectGitIgnore: "If false, do not respect gitignore filtering.",
+	}),
 	recursive: z
 		.boolean()
 		.optional()
@@ -50,12 +47,6 @@ export const readManyFilesShape = {
 		.boolean()
 		.optional()
 		.describe("Optional: apply default exclusion patterns. Defaults to true."),
-	file_filtering_options: z
-		.object({
-			respect_git_ignore: z.boolean().optional(),
-			respect_gemini_ignore: z.boolean().optional(),
-		})
-		.optional(),
 	max_files: z
 		.number()
 		.int()
@@ -82,6 +73,10 @@ const DEFAULT_EXCLUDES = [
 const DEFAULT_OUTPUT_SEPARATOR_FORMAT = "--- {filePath} ---";
 const TOTAL_BYTE_CAP = 2 * 1024 * 1024;
 const MAX_TEXT_BYTES = 1024 * 1024;
+
+function buildTruncationMessage(reasonParts: string[]): string {
+	return `TRUNCATED reason=${reasonParts.join(",")}`;
+}
 
 function isExplicitBinaryRequest(patterns: string[], ext: string): boolean {
 	const lowerExt = ext.toLowerCase();
@@ -241,7 +236,15 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 				continue;
 			}
 			const buf = await fs.readFile(abs);
-			contentParts.push(mapBinaryPart(mimeType, buf.toString("base64")));
+			const encoded = buf.toString("base64");
+			const projected = totalBytes + Buffer.byteLength(encoded, "utf8");
+			if (projected > maxOutputBytes) {
+				truncatedByBytes = true;
+				break;
+			}
+			contentParts.push(mapBinaryPart(mimeType, encoded));
+			totalBytes = projected;
+			includedFiles += 1;
 			continue;
 		}
 
@@ -275,17 +278,17 @@ export async function readManyFilesTool(input: ReadManyFilesInput) {
 		includedFiles += 1;
 	}
 
-	if (contentParts.length > 0) {
-		if (truncatedByFiles || truncatedByBytes) {
-			const reasonParts: string[] = [];
-			if (truncatedByFiles) reasonParts.push("max_files");
-			if (truncatedByBytes) reasonParts.push("max_output_bytes");
-			contentParts.push({
-				type: "text",
-				text: `TRUNCATED reason=${reasonParts.join(",")}`,
-			});
-		}
-	} else {
+	if (truncatedByFiles || truncatedByBytes) {
+		const reasonParts: string[] = [];
+		if (truncatedByFiles) reasonParts.push("max_files");
+		if (truncatedByBytes) reasonParts.push("max_output_bytes");
+		contentParts.push({
+			type: "text",
+			text: buildTruncationMessage(reasonParts),
+		});
+	}
+
+	if (contentParts.length === 0) {
 		contentParts.push({
 			type: "text",
 			text: "No files matching the criteria were found or all were skipped.",

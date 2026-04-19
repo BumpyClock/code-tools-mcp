@@ -10,6 +10,7 @@ import { z } from "zod";
 import { ToolErrorType } from "../types/tool-error-type.js";
 import { toolResultShape } from "../types/tool-result.js";
 import {
+	createCommonFileFilteringShape,
 	getPathPolicyBlockReason,
 	type getPolicyContextForRoot,
 	resolvePathAccess,
@@ -64,20 +65,10 @@ export const searchFileContentShape = {
 		.min(0)
 		.optional()
 		.describe("Show this many lines before each match."),
-	no_ignore: z
-		.boolean()
-		.optional()
-		.describe("If true, do not respect ignore files or defaults."),
-	respect_git_ignore: z
-		.boolean()
-		.optional()
-		.describe("If false, do not respect ignore files or defaults."),
-	file_filtering_options: z
-		.object({
-			respect_git_ignore: z.boolean().optional(),
-			respect_gemini_ignore: z.boolean().optional(),
-		})
-		.optional(),
+	...createCommonFileFilteringShape({
+		noIgnore: "If true, do not respect ignore files or defaults.",
+		respectGitIgnore: "If false, do not respect ignore files or defaults.",
+	}),
 	max_matches: z
 		.number()
 		.int()
@@ -151,11 +142,19 @@ async function parseRipgrepJson(
 	proc: ReturnType<typeof spawn>,
 	maxMatches: number,
 	signal?: AbortSignal,
-): Promise<{ matches: GrepMatch[]; stderr: string; truncated: boolean }> {
+): Promise<{
+	matches: GrepMatch[];
+	stderr: string;
+	truncated: boolean;
+	exitCode: number | null;
+	spawnError: string | null;
+}> {
 	const matches: GrepMatch[] = [];
 	let stderrBuf = "";
 	let truncated = false;
 	let aborted = false;
+	let exitCode: number | null = null;
+	let spawnError: string | null = null;
 
 	const onAbort = () => {
 		aborted = true;
@@ -203,17 +202,71 @@ async function parseRipgrepJson(
 		proc.stderr.on("data", (d: Buffer) => {
 			stderrBuf += d.toString();
 		});
-		proc.on("exit", () => {
+		proc.on("exit", (code) => {
+			exitCode = code;
 			if (pending.trim()) handleLine(pending);
 			resolve();
 		});
-		proc.on("error", () => resolve());
+		proc.on("error", (error) => {
+			spawnError = error.message;
+			resolve();
+		});
 	});
 
 	if (signal) signal.removeEventListener("abort", onAbort);
-	if (aborted) return { matches: [], stderr: stderrBuf, truncated };
+	if (aborted) {
+		return {
+			matches: [],
+			stderr: stderrBuf,
+			truncated,
+			exitCode,
+			spawnError,
+		};
+	}
 
-	return { matches, stderr: stderrBuf, truncated };
+	return { matches, stderr: stderrBuf, truncated, exitCode, spawnError };
+}
+
+function getInvalidRegexMessage(pattern: string, error: unknown): string {
+	const detail = error instanceof Error ? error.message : String(error);
+	return `Invalid regex pattern "${pattern}": ${detail}`;
+}
+
+function isRipgrepRegexError(stderr: string): boolean {
+	const normalized = stderr.toLowerCase();
+	return (
+		normalized.includes("regex parse error") ||
+		normalized.includes("error parsing regex") ||
+		normalized.includes("unclosed group") ||
+		normalized.includes("unclosed character class")
+	);
+}
+
+function resolveFallbackMatcher(
+	input: SearchFileContentInput,
+):
+	| { kind: "fixed" }
+	| { kind: "regex"; regex: RegExp }
+	| { kind: "error"; message: string } {
+	if (input.fixed_strings === true) {
+		return { kind: "fixed" };
+	}
+
+	if (!isProbablySafeRegex(input.pattern)) {
+		return { kind: "fixed" };
+	}
+
+	try {
+		return {
+			kind: "regex",
+			regex: new RegExp(input.pattern, input.case_sensitive ? "" : "i"),
+		};
+	} catch (error) {
+		return {
+			kind: "error",
+			message: getInvalidRegexMessage(input.pattern, error),
+		};
+	}
 }
 
 async function fallbackSearch(
@@ -223,12 +276,11 @@ async function fallbackSearch(
 	respectGitIgnore: boolean,
 	root: string,
 	policy: Awaited<ReturnType<typeof getPolicyContextForRoot>>,
+	matcher: { kind: "fixed" } | { kind: "regex"; regex: RegExp },
 	signal?: AbortSignal,
 	targetFile?: string,
 ): Promise<GrepMatch[]> {
 	const results: GrepMatch[] = [];
-	const caseSensitive = input.case_sensitive === true;
-	const fixedStrings = input.fixed_strings === true;
 	const includePattern = input.include ?? "**/*";
 	const ignore = respectGitIgnore ? DEFAULT_EXCLUDES : [];
 
@@ -243,21 +295,6 @@ async function fallbackSearch(
 				ignore,
 			});
 
-	const pattern = input.pattern;
-	let regex: RegExp | null = null;
-	let useFixedStrings = fixedStrings;
-	if (!fixedStrings) {
-		if (isProbablySafeRegex(pattern)) {
-			try {
-				regex = new RegExp(pattern, caseSensitive ? "" : "i");
-			} catch {
-				useFixedStrings = true;
-			}
-		} else {
-			useFixedStrings = true;
-		}
-	}
-
 	for (const absFile of entries) {
 		if (signal?.aborted) break;
 		const relToRoot = toPosixPath(path.relative(root, absFile));
@@ -270,9 +307,10 @@ async function fallbackSearch(
 		for (let i = 0; i < lines.length; i++) {
 			if (signal?.aborted) break;
 			const line = lines[i] ?? "";
-			const matched = useFixedStrings
-				? line.includes(pattern)
-				: (regex?.test(line) ?? false);
+			const matched =
+				matcher.kind === "fixed"
+					? line.includes(input.pattern)
+					: matcher.regex.test(line);
 			if (!matched) continue;
 			results.push({
 				filePath: relToSearch,
@@ -284,6 +322,44 @@ async function fallbackSearch(
 	}
 
 	return results;
+}
+
+async function runFallbackSearch(
+	input: SearchFileContentInput,
+	searchDir: string,
+	maxMatches: number,
+	respectGitIgnore: boolean,
+	access: Extract<Awaited<ReturnType<typeof resolvePathAccess>>, { ok: true }>,
+	combinedSignal: AbortSignal,
+	searchAbs: string,
+	stats: Awaited<ReturnType<typeof fs.stat>>,
+) {
+	const matcher = resolveFallbackMatcher(input);
+	if (matcher.kind === "error") {
+		return {
+			ok: false as const,
+			result: {
+				llmContent: matcher.message,
+				error: {
+					message: matcher.message,
+					type: ToolErrorType.INVALID_TOOL_PARAMS,
+				},
+			},
+		};
+	}
+
+	const matches = await fallbackSearch(
+		input,
+		searchDir,
+		maxMatches,
+		respectGitIgnore,
+		access.root,
+		access.policy,
+		matcher,
+		combinedSignal,
+		stats.isFile() ? searchAbs : undefined,
+	);
+	return { ok: true as const, matches };
 }
 
 function formatCompactMatchesOutput(
@@ -379,77 +455,120 @@ export async function searchFileContentTool(
 	let matches: GrepMatch[] = [];
 	let wasTruncated = false;
 
-	let rgCmd: string | null = null;
-	if (await haveRgOnPath()) {
-		rgCmd = "rg";
-	} else {
-		rgCmd = await ensureLocalRg();
-	}
-
-	if (rgCmd) {
-		const args: string[] = ["--json"];
-		if (!input.case_sensitive) args.push("--ignore-case");
-		if (input.fixed_strings) {
-			args.push("--fixed-strings", input.pattern);
+	try {
+		let rgCmd: string | null = null;
+		if (await haveRgOnPath()) {
+			rgCmd = "rg";
 		} else {
-			args.push("--regexp", input.pattern);
+			rgCmd = await ensureLocalRg();
 		}
-		if (input.context !== undefined) {
-			args.push("--context", input.context.toString());
-		}
-		if (input.after !== undefined) {
-			args.push("--after-context", input.after.toString());
-		}
-		if (input.before !== undefined) {
-			args.push("--before-context", input.before.toString());
-		}
-		if (!respectGitIgnore) {
-			args.push("--no-ignore");
-		}
-		if (input.include) {
-			args.push("--glob", input.include);
-		}
-		if (respectGitIgnore) {
-			for (const exclude of DEFAULT_EXCLUDES) {
-				args.push("--glob", `!${exclude}`);
+
+		if (rgCmd) {
+			const args: string[] = ["--json"];
+			if (!input.case_sensitive) args.push("--ignore-case");
+			if (input.fixed_strings) {
+				args.push("--fixed-strings", input.pattern);
+			} else {
+				args.push("--regexp", input.pattern);
 			}
+			if (input.context !== undefined) {
+				args.push("--context", input.context.toString());
+			}
+			if (input.after !== undefined) {
+				args.push("--after-context", input.after.toString());
+			}
+			if (input.before !== undefined) {
+				args.push("--before-context", input.before.toString());
+			}
+			if (!respectGitIgnore) {
+				args.push("--no-ignore");
+			}
+			if (input.include) {
+				args.push("--glob", input.include);
+			}
+			if (respectGitIgnore) {
+				for (const exclude of DEFAULT_EXCLUDES) {
+					args.push("--glob", `!${exclude}`);
+				}
+			}
+			args.push(searchAbs);
+
+			const proc = spawn(rgCmd, args, {
+				cwd: searchDir,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+			const parsed = await parseRipgrepJson(
+				proc,
+				maxMatches,
+				combinedController.signal,
+			);
+			if (timeoutController.signal.aborted && !signal?.aborted) {
+				const message = `Search timed out after ${DEFAULT_TIMEOUT_MS}ms`;
+				return {
+					llmContent: message,
+					error: { message, type: ToolErrorType.EXECUTION_FAILED },
+				};
+			}
+			if (parsed.spawnError) {
+				const fallback = await runFallbackSearch(
+					input,
+					searchDir,
+					maxMatches,
+					respectGitIgnore,
+					access,
+					combinedController.signal,
+					searchAbs,
+					stats,
+				);
+				if (!fallback.ok) {
+					return fallback.result;
+				}
+				matches = fallback.matches;
+				wasTruncated = matches.length >= maxMatches;
+			} else if (parsed.exitCode === 2) {
+				const stderr = parsed.stderr.trim();
+				const message = stderr || `ripgrep failed while searching ${searchAbs}`;
+				return {
+					llmContent: message,
+					error: {
+						message,
+						type: isRipgrepRegexError(stderr)
+							? ToolErrorType.INVALID_TOOL_PARAMS
+							: ToolErrorType.GREP_EXECUTION_ERROR,
+					},
+				};
+			} else {
+				matches = parsed.matches.map((match) => {
+					const absoluteFilePath = path.resolve(searchDir, match.filePath);
+					const relativeFilePath =
+						path.relative(searchDir, absoluteFilePath) ||
+						path.basename(absoluteFilePath);
+					return { ...match, filePath: relativeFilePath };
+				});
+				wasTruncated = parsed.truncated || matches.length >= maxMatches;
+			}
+		} else {
+			const fallback = await runFallbackSearch(
+				input,
+				searchDir,
+				maxMatches,
+				respectGitIgnore,
+				access,
+				combinedController.signal,
+				searchAbs,
+				stats,
+			);
+			if (!fallback.ok) {
+				return fallback.result;
+			}
+			matches = fallback.matches;
+			wasTruncated = matches.length >= maxMatches;
 		}
-		args.push(searchAbs);
-
-		const proc = spawn(rgCmd, args, {
-			cwd: searchDir,
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		const parsed = await parseRipgrepJson(
-			proc,
-			maxMatches,
-			combinedController.signal,
-		);
-		matches = parsed.matches.map((match) => {
-			const absoluteFilePath = path.resolve(searchDir, match.filePath);
-			const relativeFilePath =
-				path.relative(searchDir, absoluteFilePath) ||
-				path.basename(absoluteFilePath);
-			return { ...match, filePath: relativeFilePath };
-		});
-		wasTruncated = parsed.truncated || matches.length >= maxMatches;
-	} else {
-		matches = await fallbackSearch(
-			input,
-			searchDir,
-			maxMatches,
-			respectGitIgnore,
-			access.root,
-			access.policy,
-			combinedController.signal,
-			stats.isFile() ? searchAbs : undefined,
-		);
-		wasTruncated = matches.length >= maxMatches;
+	} finally {
+		clearTimeout(timeoutId);
+		if (signal) signal.removeEventListener("abort", onAbort);
+		timeoutController.signal.removeEventListener("abort", onAbort);
 	}
-
-	clearTimeout(timeoutId);
-	if (signal) signal.removeEventListener("abort", onAbort);
-	timeoutController.signal.removeEventListener("abort", onAbort);
 
 	matches = matches.filter((match) => {
 		const absFile = path.resolve(searchDir, match.filePath);
